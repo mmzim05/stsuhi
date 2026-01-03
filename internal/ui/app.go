@@ -5,8 +5,10 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"stsuhi/internal/autologin"
+	"stsuhi/internal/config"
+	"stsuhi/internal/keyring"
 	"stsuhi/internal/models"
-	"stsuhi/internal/ssh"
 	"stsuhi/internal/storage"
 )
 
@@ -17,6 +19,9 @@ const (
 	StateFirstBoot AppState = iota
 	StateFirstBootConfirm
 	StateLogin
+	StateAutoLoginPrompt
+	StateAutoLoginSetup
+	StateSettings
 	StateList
 	StateAdd
 	StateEdit
@@ -27,31 +32,67 @@ const (
 
 // App is the main application model
 type App struct {
-	state           AppState
-	storage         storage.Storage
-	masterPassword  string
-	connections     []*models.Connection
-	list            ConnectionList
-	form            ConnectionForm
-	passwordInput   PasswordInput
-	confirmPassword PasswordInput
-	deleteTarget    *models.Connection
-	err             string
-	width           int
-	height          int
+	state              AppState
+	storage            storage.Storage
+	config             *config.Config
+	masterPassword     string
+	connections        []*models.Connection
+	list               ConnectionList
+	form               ConnectionForm
+	passwordInput      PasswordInput
+	confirmPassword    PasswordInput
+	autoLoginSetup     AutoLoginSetup
+	settings           Settings
+	deleteTarget       *models.Connection
+	pendingConnection  *models.Connection // Connection to establish after TUI exits
+	err                string
+	width              int
+	height             int
+	keyringAvailable   bool
 }
 
 // NewApp creates a new application instance
-func NewApp(store storage.Storage) *App {
+func NewApp(store storage.Storage, cfg *config.Config) *App {
 	return &App{
-		storage: store,
-		width:   80,
-		height:  24,
+		storage:          store,
+		config:           cfg,
+		width:            80,
+		height:           24,
+		keyringAvailable: false, // Will be checked lazily if auto-login is enabled
+	}
+}
+
+// NewAppWithPassword creates a new application instance with a pre-authenticated master password
+func NewAppWithPassword(store storage.Storage, cfg *config.Config, masterPassword string) *App {
+	return &App{
+		storage:          store,
+		config:           cfg,
+		masterPassword:   masterPassword,
+		width:            80,
+		height:           24,
+		keyringAvailable: false,
 	}
 }
 
 // Init initializes the application
 func (a *App) Init() tea.Cmd {
+	// If already authenticated (returning from SSH), skip login
+	if a.masterPassword != "" {
+		// Load connections and go to list
+		connections, err := a.storage.ListConnections(a.masterPassword)
+		if err != nil {
+			a.err = fmt.Sprintf("Failed to load connections: %v", err)
+			a.state = StateList
+			return nil
+		}
+
+		a.connections = connections
+		a.list = NewConnectionList(a.connections)
+		a.list.SetSize(a.width, a.height)
+		a.state = StateList
+		return nil
+	}
+
 	// Check if this is first boot
 	isSet, err := a.storage.IsMasterPasswordSet()
 	if err != nil {
@@ -65,6 +106,53 @@ func (a *App) Init() tea.Cmd {
 		a.state = StateFirstBoot
 		a.passwordInput = NewPasswordInput("Create Master Password:", "Enter a strong password")
 		return a.passwordInput.Init()
+	}
+
+	// Try auto-login if enabled
+	if a.keyringAvailable && a.config.AutoLogin.Enabled {
+		// Check security rules
+		shouldClear, reason := autologin.ShouldClearAutoLogin(a.config)
+		if shouldClear {
+			// Clear auto-login and fall back to manual
+			autologin.ClearAutoLogin(a.config)
+			config.Save(a.storage.GetConfigPath(), a.config)
+			a.err = fmt.Sprintf("Auto-login cleared: %s", reason)
+			a.state = StateLogin
+			a.passwordInput = NewPasswordInput("Master Password:", "Enter your master password")
+			return a.passwordInput.Init()
+		}
+
+		// Try to get password from keyring
+		password, err := keyring.GetPassword()
+		if err == nil {
+			// Verify password
+			valid, err := a.storage.VerifyMasterPassword(password)
+			if err == nil && valid {
+				// Success! Auto-login
+				a.masterPassword = password
+
+				// Update login metadata
+				autologin.UpdateLoginMetadata(a.config)
+				config.Save(a.storage.GetConfigPath(), a.config)
+
+				// Load connections
+				connections, err := a.storage.ListConnections(a.masterPassword)
+				if err != nil {
+					a.err = fmt.Sprintf("Failed to load connections: %v", err)
+					a.state = StateList
+					return nil
+				}
+
+				a.connections = connections
+				a.list = NewConnectionList(a.connections)
+				a.list.SetSize(a.width, a.height)
+				a.state = StateList
+				return nil
+			}
+		}
+		// If auto-login failed, clear it and fall back to manual
+		autologin.ClearAutoLogin(a.config)
+		config.Save(a.storage.GetConfigPath(), a.config)
 	}
 
 	// Login required
@@ -92,6 +180,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.updateFirstBootConfirm(msg)
 		case StateLogin:
 			return a.updateLogin(msg)
+		case StateAutoLoginPrompt:
+			return a.updateAutoLoginPrompt(msg)
+		case StateAutoLoginSetup:
+			return a.updateAutoLoginSetup(msg)
+		case StateSettings:
+			return a.updateSettings(msg)
 		case StateList:
 			return a.updateList(msg)
 		case StateAdd, StateEdit:
@@ -117,6 +211,12 @@ func (a *App) View() string {
 		return a.viewFirstBootConfirm()
 	case StateLogin:
 		return a.viewLogin()
+	case StateAutoLoginPrompt:
+		return a.viewAutoLoginPrompt()
+	case StateAutoLoginSetup:
+		return a.viewAutoLoginSetup()
+	case StateSettings:
+		return a.viewSettings()
 	case StateList:
 		return a.viewList()
 	case StateAdd, StateEdit:
@@ -259,6 +359,13 @@ func (a *App) updateLogin(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.connections = connections
 		a.list = NewConnectionList(a.connections)
 		a.list.SetSize(a.width, a.height)
+
+		// Check if we should show auto-login prompt
+		if a.keyringAvailable && !a.config.AutoLogin.Enabled && !a.config.AutoLogin.DontAskAgain {
+			a.state = StateAutoLoginPrompt
+			return a, nil
+		}
+
 		a.state = StateList
 		return a, nil
 	}
@@ -288,6 +395,11 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c", "q":
 		a.state = StateQuitting
 		return a, tea.Quit
+	case "s":
+		// Open settings
+		a.settings = NewSettings(a.config)
+		a.state = StateSettings
+		return a, nil
 	case "a":
 		a.state = StateAdd
 		a.form = NewConnectionForm(nil)
@@ -388,6 +500,127 @@ func (a *App) viewConnecting() string {
 	return successStyle.Render("Connecting to SSH...")
 }
 
+// Auto-Login Prompt State
+func (a *App) updateAutoLoginPrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "esc", "n":
+		// No, maybe later
+		a.state = StateList
+		return a, nil
+	case "y":
+		// Yes, configure auto-login
+		a.autoLoginSetup = NewAutoLoginSetup()
+		a.state = StateAutoLoginSetup
+		return a, nil
+	case "d":
+		// Don't ask again
+		a.config.AutoLogin.DontAskAgain = true
+		config.Save(a.storage.GetConfigPath(), a.config)
+		a.state = StateList
+		return a, nil
+	}
+	return a, nil
+}
+
+func (a *App) viewAutoLoginPrompt() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Enable Auto-Login?"))
+	b.WriteString("\n\n")
+	b.WriteString(subtitleStyle.Render("Would you like to enable auto-login?"))
+	b.WriteString("\n")
+	b.WriteString(subtitleStyle.Render("Your master password will be stored securely in your system keyring."))
+	b.WriteString("\n\n")
+	b.WriteString(labelStyle.Render("[Y]"))
+	b.WriteString(" Yes, configure auto-login\n")
+	b.WriteString(labelStyle.Render("[N]"))
+	b.WriteString(" No, ask me later\n")
+	b.WriteString(labelStyle.Render("[D]"))
+	b.WriteString(" Don't ask again\n\n")
+	b.WriteString(helpStyle.Render("y: yes • n: no • d: don't ask"))
+	return b.String()
+}
+
+// Auto-Login Setup State
+func (a *App) updateAutoLoginSetup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "esc":
+		a.state = StateList
+		return a, nil
+	case "enter":
+		// Validate and save
+		if err := a.autoLoginSetup.Validate(); err != nil {
+			a.autoLoginSetup.SetError(err.Error())
+			return a, nil
+		}
+
+		// Save password to keyring
+		if err := keyring.SavePassword(a.masterPassword); err != nil {
+			a.autoLoginSetup.SetError(fmt.Sprintf("Failed to save to keyring: %v", err))
+			return a, nil
+		}
+
+		// Save config
+		a.config.AutoLogin.Enabled = true
+		a.config.AutoLogin.SecurityRules = a.autoLoginSetup.GetRules()
+		autologin.UpdateLoginMetadata(a.config)
+		if err := config.Save(a.storage.GetConfigPath(), a.config); err != nil {
+			a.autoLoginSetup.SetError(fmt.Sprintf("Failed to save config: %v", err))
+			return a, nil
+		}
+
+		a.state = StateList
+		return a, nil
+	}
+
+	var cmd tea.Cmd
+	a.autoLoginSetup, cmd = a.autoLoginSetup.Update(msg)
+	return a, cmd
+}
+
+func (a *App) viewAutoLoginSetup() string {
+	return a.autoLoginSetup.View()
+}
+
+// Settings State
+func (a *App) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "esc":
+		a.state = StateList
+		return a, nil
+	case "enter":
+		option := a.settings.GetSelectedOption()
+		switch option {
+		case SettingsEnable:
+			// Enable auto-login - go to setup
+			a.autoLoginSetup = NewAutoLoginSetup()
+			a.state = StateAutoLoginSetup
+			return a, nil
+		case SettingsReconfigure:
+			// Reconfigure auto-login
+			a.autoLoginSetup = NewAutoLoginSetup()
+			a.state = StateAutoLoginSetup
+			return a, nil
+		case SettingsDisable:
+			// Disable auto-login
+			autologin.ClearAutoLogin(a.config)
+			config.Save(a.storage.GetConfigPath(), a.config)
+			a.settings = NewSettings(a.config) // Refresh settings view
+			return a, nil
+		case SettingsBack:
+			a.state = StateList
+			return a, nil
+		}
+	}
+
+	var cmd tea.Cmd
+	a.settings, cmd = a.settings.Update(msg)
+	return a, cmd
+}
+
+func (a *App) viewSettings() string {
+	return a.settings.View()
+}
+
 // Helper functions
 func (a *App) reloadConnections() {
 	connections, err := a.storage.ListConnections(a.masterPassword)
@@ -400,17 +633,18 @@ func (a *App) reloadConnections() {
 }
 
 func (a *App) connectSSH(conn *models.Connection) tea.Cmd {
-	return func() tea.Msg {
-		// Show connecting state briefly
-		a.state = StateConnecting
+	// Store the connection to establish after TUI exits
+	a.pendingConnection = conn
+	a.state = StateQuitting
+	return tea.Quit
+}
 
-		// Execute SSH connection
-		if err := ssh.Connect(conn); err != nil {
-			a.err = fmt.Sprintf("Connection failed: %v", err)
-		}
+// GetPendingConnection returns the connection to establish (if any) after TUI exits
+func (a *App) GetPendingConnection() *models.Connection {
+	return a.pendingConnection
+}
 
-		// Return to list view
-		a.state = StateList
-		return nil
-	}
+// GetMasterPassword returns the master password (for preserving authentication across restarts)
+func (a *App) GetMasterPassword() string {
+	return a.masterPassword
 }

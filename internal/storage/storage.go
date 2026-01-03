@@ -30,4 +30,7 @@ type Storage interface {
 
 	// ConnectionExists checks if a connection with the given ID exists
 	ConnectionExists(id string) (bool, error)
+
+	// GetConfigPath returns the path to the config file
+	GetConfigPath() string
 }

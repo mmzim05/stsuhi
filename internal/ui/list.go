@@ -76,7 +76,7 @@ func (cl ConnectionList) View() string {
 	var b strings.Builder
 	b.WriteString(cl.list.View())
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("↑/↓ or j/k: navigate • enter: connect • a: add • e: edit • d: delete • q: quit"))
+	b.WriteString(helpStyle.Render("↑/↓ or j/k: navigate • enter: connect • a: add • e: edit • d: delete • s: settings • q: quit"))
 	return b.String()
 }
 

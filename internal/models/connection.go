@@ -18,15 +18,16 @@ var (
 
 // Connection represents an SSH connection configuration
 type Connection struct {
-	ID          string    `json:"id"`
-	ServerName  string    `json:"server_name"`
-	User        string    `json:"user"`
-	Address     string    `json:"address"`
-	Port        int       `json:"port"`
-	Password    string    `json:"password,omitempty"`
-	PasskeyPath string    `json:"passkey_path,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID           string    `json:"id"`
+	ServerName   string    `json:"server_name"`
+	User         string    `json:"user"`
+	Address      string    `json:"address"`
+	Port         int       `json:"port"`
+	Password     string    `json:"password,omitempty"`
+	PasskeyPath  string    `json:"passkey_path,omitempty"`
+	SudoPassword string    `json:"sudo_password,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // NewConnection creates a new Connection with generated ID and timestamps

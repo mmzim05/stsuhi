@@ -14,6 +14,7 @@ const (
 	StorageDirName     = ".stsuhi"
 	ConnectionsDirName = "connections"
 	MasterKeyFileName  = "master.key"
+	ConfigFileName     = "config.json"
 	ConnectionFileExt  = ".enc"
 )
 
@@ -203,4 +204,9 @@ func (fs *FileStorage) ConnectionExists(id string) (bool, error) {
 		return false, fmt.Errorf("failed to check connection: %w", err)
 	}
 	return true, nil
+}
+
+// GetConfigPath returns the path to the config file
+func (fs *FileStorage) GetConfigPath() string {
+	return filepath.Join(fs.storageDir, ConfigFileName)
 }
