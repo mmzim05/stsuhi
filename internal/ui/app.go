@@ -58,7 +58,7 @@ func NewApp(store storage.Storage, cfg *config.Config) *App {
 		config:           cfg,
 		width:            80,
 		height:           24,
-		keyringAvailable: false, // Will be checked lazily if auto-login is enabled
+		keyringAvailable: keyring.IsAvailable(),
 	}
 }
 
@@ -108,18 +108,17 @@ func (a *App) Init() tea.Cmd {
 		return a.passwordInput.Init()
 	}
 
-	// Try auto-login if enabled
-	if a.keyringAvailable && a.config.AutoLogin.Enabled {
-		// Check security rules
-		shouldClear, reason := autologin.ShouldClearAutoLogin(a.config)
-		if shouldClear {
-			// Clear auto-login and fall back to manual
-			autologin.ClearAutoLogin(a.config)
-			config.Save(a.storage.GetConfigPath(), a.config)
-			a.err = fmt.Sprintf("Auto-login cleared: %s", reason)
-			a.state = StateLogin
-			a.passwordInput = NewPasswordInput("Master Password:", "Enter your master password")
-			return a.passwordInput.Init()
+	// Try auto-login if keyring is available
+	if a.keyringAvailable {
+		// Check if boot ID has changed (reboot detection)
+		currentBootID, err := autologin.GetBootID()
+		if err == nil {
+			// If boot ID changed, clear keyring
+			if a.config.AutoLogin.BootID != "" && a.config.AutoLogin.BootID != currentBootID {
+				keyring.DeletePassword()
+				a.config.AutoLogin.BootID = currentBootID
+				config.Save(a.storage.GetConfigPath(), a.config)
+			}
 		}
 
 		// Try to get password from keyring
@@ -131,9 +130,11 @@ func (a *App) Init() tea.Cmd {
 				// Success! Auto-login
 				a.masterPassword = password
 
-				// Update login metadata
-				autologin.UpdateLoginMetadata(a.config)
-				config.Save(a.storage.GetConfigPath(), a.config)
+				// Update boot ID
+				if currentBootID != "" {
+					a.config.AutoLogin.BootID = currentBootID
+					config.Save(a.storage.GetConfigPath(), a.config)
+				}
 
 				// Load connections
 				connections, err := a.storage.ListConnections(a.masterPassword)
@@ -150,9 +151,6 @@ func (a *App) Init() tea.Cmd {
 				return nil
 			}
 		}
-		// If auto-login failed, clear it and fall back to manual
-		autologin.ClearAutoLogin(a.config)
-		config.Save(a.storage.GetConfigPath(), a.config)
 	}
 
 	// Login required
@@ -300,6 +298,16 @@ func (a *App) updateFirstBootConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
+		// Save password to keyring for auto-login
+		if a.keyringAvailable {
+			keyring.SavePassword(a.masterPassword)
+			// Update boot ID
+			if bootID, err := autologin.GetBootID(); err == nil {
+				a.config.AutoLogin.BootID = bootID
+				config.Save(a.storage.GetConfigPath(), a.config)
+			}
+		}
+
 		// Load connections (empty on first boot)
 		a.connections = []*models.Connection{}
 		a.list = NewConnectionList(a.connections)
@@ -349,6 +357,16 @@ func (a *App) updateLogin(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.masterPassword = password
 		a.err = ""
 
+		// Save password to keyring for auto-login
+		if a.keyringAvailable {
+			keyring.SavePassword(a.masterPassword)
+			// Update boot ID
+			if bootID, err := autologin.GetBootID(); err == nil {
+				a.config.AutoLogin.BootID = bootID
+				config.Save(a.storage.GetConfigPath(), a.config)
+			}
+		}
+
 		// Load connections
 		connections, err := a.storage.ListConnections(a.masterPassword)
 		if err != nil {
@@ -359,12 +377,6 @@ func (a *App) updateLogin(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.connections = connections
 		a.list = NewConnectionList(a.connections)
 		a.list.SetSize(a.width, a.height)
-
-		// Check if we should show auto-login prompt
-		if a.keyringAvailable && !a.config.AutoLogin.Enabled && !a.config.AutoLogin.DontAskAgain {
-			a.state = StateAutoLoginPrompt
-			return a, nil
-		}
 
 		a.state = StateList
 		return a, nil

@@ -11,7 +11,6 @@ import (
 )
 
 const (
-	StorageDirName     = ".stsuhi"
 	ConnectionsDirName = "connections"
 	MasterKeyFileName  = "master.key"
 	ConfigFileName     = "config.json"
@@ -32,7 +31,7 @@ func NewFileStorage() (*FileStorage, error) {
 		return nil, fmt.Errorf("failed to get home directory: %w", err)
 	}
 
-	storageDir := filepath.Join(homeDir, StorageDirName)
+	storageDir := filepath.Join(homeDir, ".config", "stsuhi")
 	connectionsDir := filepath.Join(storageDir, ConnectionsDirName)
 	masterKeyPath := filepath.Join(storageDir, MasterKeyFileName)
 
