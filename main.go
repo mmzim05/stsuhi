@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"stsuhi/internal/config"
@@ -65,9 +66,11 @@ func main() {
 				if err := ssh.Connect(conn); err != nil {
 					fmt.Fprintf(os.Stderr, "SSH connection failed: %v\n", err)
 					// Don't exit, just loop back to TUI to show error
+					time.Sleep(1 * time.Second)
 					continue
 				}
-				// SSH connection ended normally, loop back to TUI
+				// SSH connection ended normally, add delay before restarting TUI
+				time.Sleep(1 * time.Second)
 				continue
 			}
 		}

@@ -70,7 +70,7 @@ func NewAppWithPassword(store storage.Storage, cfg *config.Config, masterPasswor
 		masterPassword:   masterPassword,
 		width:            80,
 		height:           24,
-		keyringAvailable: false,
+		keyringAvailable: keyring.IsAvailable(),
 	}
 }
 
@@ -82,6 +82,10 @@ func (a *App) Init() tea.Cmd {
 		connections, err := a.storage.ListConnections(a.masterPassword)
 		if err != nil {
 			a.err = fmt.Sprintf("Failed to load connections: %v", err)
+			// Initialize empty list to avoid crashes
+			a.connections = []*models.Connection{}
+			a.list = NewConnectionList(a.connections)
+			a.list.SetSize(a.width, a.height)
 			a.state = StateList
 			return nil
 		}

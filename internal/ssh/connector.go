@@ -113,17 +113,14 @@ func connectWithPTY(conn *models.Connection) error {
 			}
 
 			// Detect sudo password prompt - use same password as SSH login
+			// Only auto-fill if the prompt is for the SSH user (not docker containers, etc.)
 			if conn.Password != "" && sshPasswordSent {
-				// Check for sudo password prompts in various formats
-				if strings.Contains(output, "[sudo]") && strings.Contains(output, "password") {
-					ptmx.Write([]byte(conn.Password + "\n"))
-					outputBuffer.Reset()
-					continue
-				}
-				// Also match "Password:" or "password:" at end of line (generic sudo prompt)
-				// Only do this after SSH password was sent to avoid confusion
-				if strings.HasSuffix(strings.TrimSpace(output), "password:") ||
-				   strings.HasSuffix(strings.TrimSpace(output), "password: ") {
+				sshUser := strings.ToLower(conn.User)
+				// Check for sudo password prompts that match the SSH user
+				// Format: "[sudo] password for username:"
+				if strings.Contains(output, "[sudo]") &&
+				   strings.Contains(output, "password") &&
+				   strings.Contains(output, sshUser) {
 					ptmx.Write([]byte(conn.Password + "\n"))
 					outputBuffer.Reset()
 					continue
