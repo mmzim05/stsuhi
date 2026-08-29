@@ -9,26 +9,43 @@ import (
 
 // SecurityRules defines when auto-login should be cleared
 type SecurityRules struct {
-	ClearOnReboot      bool `json:"clear_on_reboot"`
-	ClearOnLock        bool `json:"clear_on_lock"`
-	ClearOnIdle        bool `json:"clear_on_idle"`
-	IdleTimeoutHours   int  `json:"idle_timeout_hours"`
-	NeverClear         bool `json:"never_clear"`
+	ClearOnReboot    bool `json:"clear_on_reboot"`
+	ClearOnLock      bool `json:"clear_on_lock"`
+	ClearOnIdle      bool `json:"clear_on_idle"`
+	IdleTimeoutHours int  `json:"idle_timeout_hours"`
+	NeverClear       bool `json:"never_clear"`
 }
 
 // AutoLoginConfig stores auto-login settings
 type AutoLoginConfig struct {
-	Enabled           bool          `json:"enabled"`
-	SecurityRules     SecurityRules `json:"security_rules"`
-	LastLoginTime     time.Time     `json:"last_login_timestamp"`
-	BootID            string        `json:"boot_id"`
-	SessionID         string        `json:"session_id"`
-	DontAskAgain      bool          `json:"dont_ask_again"`
+	Enabled             bool          `json:"enabled"`
+	SecurityRules       SecurityRules `json:"security_rules"`
+	LastLoginTime       time.Time     `json:"last_login_timestamp"`
+	BootID              string        `json:"boot_id"`
+	SessionID           string        `json:"session_id"`
+	DontAskAgain        bool          `json:"dont_ask_again"`
+	Backend             string        `json:"backend"` // "keyring" (default) or "1password"
+	OnePasswordItemName string        `json:"onepassword_item_name,omitempty"`
 }
+
+// BackendKeyring and BackendOnePassword identify the supported auto-login backends.
+const (
+	BackendKeyring     = "keyring"
+	BackendOnePassword = "1password"
+)
 
 // Config represents the application configuration
 type Config struct {
 	AutoLogin AutoLoginConfig `json:"auto_login"`
+}
+
+// EffectiveBackend returns the configured auto-login backend, treating an
+// empty value (configs written before the backend field existed) as keyring.
+func (a *AutoLoginConfig) EffectiveBackend() string {
+	if a.Backend == "" {
+		return BackendKeyring
+	}
+	return a.Backend
 }
 
 // GetDefault returns the default configuration
@@ -44,6 +61,7 @@ func GetDefault() *Config {
 				NeverClear:       false,
 			},
 			DontAskAgain: true, // Don't prompt for auto-login by default
+			Backend:      BackendKeyring,
 		},
 	}
 }

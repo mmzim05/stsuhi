@@ -9,6 +9,7 @@ import (
 	"stsuhi/internal/config"
 	"stsuhi/internal/keyring"
 	"stsuhi/internal/models"
+	"stsuhi/internal/onepassword"
 	"stsuhi/internal/storage"
 )
 
@@ -32,23 +33,23 @@ const (
 
 // App is the main application model
 type App struct {
-	state              AppState
-	storage            storage.Storage
-	config             *config.Config
-	masterPassword     string
-	connections        []*models.Connection
-	list               ConnectionList
-	form               ConnectionForm
-	passwordInput      PasswordInput
-	confirmPassword    PasswordInput
-	autoLoginSetup     AutoLoginSetup
-	settings           Settings
-	deleteTarget       *models.Connection
-	pendingConnection  *models.Connection // Connection to establish after TUI exits
-	err                string
-	width              int
-	height             int
-	keyringAvailable   bool
+	state             AppState
+	storage           storage.Storage
+	config            *config.Config
+	masterPassword    string
+	connections       []*models.Connection
+	list              ConnectionList
+	form              ConnectionForm
+	passwordInput     PasswordInput
+	confirmPassword   PasswordInput
+	autoLoginSetup    AutoLoginSetup
+	settings          Settings
+	deleteTarget      *models.Connection
+	pendingConnection *models.Connection // Connection to establish after TUI exits
+	err               string
+	width             int
+	height            int
+	keyringAvailable  bool
 }
 
 // NewApp creates a new application instance
@@ -112,47 +113,41 @@ func (a *App) Init() tea.Cmd {
 		return a.passwordInput.Init()
 	}
 
-	// Try auto-login if keyring is available
-	if a.keyringAvailable {
-		// Check if boot ID has changed (reboot detection)
-		currentBootID, err := autologin.GetBootID()
-		if err == nil {
-			// If boot ID changed, clear keyring
-			if a.config.AutoLogin.BootID != "" && a.config.AutoLogin.BootID != currentBootID {
-				keyring.DeletePassword()
-				a.config.AutoLogin.BootID = currentBootID
-				config.Save(a.storage.GetConfigPath(), a.config)
+	// Try auto-login according to the configured backend
+	switch a.config.AutoLogin.EffectiveBackend() {
+	case config.BackendOnePassword:
+		if onepassword.IsAvailable() {
+			if password, err := onepassword.GetPassword(a.config.AutoLogin.OnePasswordItemName); err == nil {
+				if a.tryAutoLogin(password) {
+					return nil
+				}
 			}
 		}
 
-		// Try to get password from keyring
-		password, err := keyring.GetPassword()
-		if err == nil {
-			// Verify password
-			valid, err := a.storage.VerifyMasterPassword(password)
-			if err == nil && valid {
-				// Success! Auto-login
-				a.masterPassword = password
-
-				// Update boot ID
-				if currentBootID != "" {
+	default: // keyring
+		if a.keyringAvailable {
+			// Check if boot ID has changed (reboot detection)
+			currentBootID, err := autologin.GetBootID()
+			if err == nil {
+				// If boot ID changed, clear keyring
+				if a.config.AutoLogin.BootID != "" && a.config.AutoLogin.BootID != currentBootID {
+					keyring.DeletePassword()
 					a.config.AutoLogin.BootID = currentBootID
 					config.Save(a.storage.GetConfigPath(), a.config)
 				}
+			}
 
-				// Load connections
-				connections, err := a.storage.ListConnections(a.masterPassword)
-				if err != nil {
-					a.err = fmt.Sprintf("Failed to load connections: %v", err)
-					a.state = StateList
+			// Try to get password from keyring
+			password, keyringErr := keyring.GetPassword()
+			if keyringErr == nil {
+				if a.tryAutoLogin(password) {
+					// Update boot ID
+					if currentBootID != "" {
+						a.config.AutoLogin.BootID = currentBootID
+						config.Save(a.storage.GetConfigPath(), a.config)
+					}
 					return nil
 				}
-
-				a.connections = connections
-				a.list = NewConnectionList(a.connections)
-				a.list.SetSize(a.width, a.height)
-				a.state = StateList
-				return nil
 			}
 		}
 	}
@@ -525,7 +520,7 @@ func (a *App) updateAutoLoginPrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case "y":
 		// Yes, configure auto-login
-		a.autoLoginSetup = NewAutoLoginSetup()
+		a.autoLoginSetup = NewAutoLoginSetup(a.config, a.masterPassword)
 		a.state = StateAutoLoginSetup
 		return a, nil
 	case "d":
@@ -544,7 +539,7 @@ func (a *App) viewAutoLoginPrompt() string {
 	b.WriteString("\n\n")
 	b.WriteString(subtitleStyle.Render("Would you like to enable auto-login?"))
 	b.WriteString("\n")
-	b.WriteString(subtitleStyle.Render("Your master password will be stored securely in your system keyring."))
+	b.WriteString(subtitleStyle.Render("Your master password can be stored in your system keyring, or unlocked via 1Password."))
 	b.WriteString("\n\n")
 	b.WriteString(labelStyle.Render("[Y]"))
 	b.WriteString(" Yes, configure auto-login\n")
@@ -569,14 +564,22 @@ func (a *App) updateAutoLoginSetup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
-		// Save password to keyring
-		if err := keyring.SavePassword(a.masterPassword); err != nil {
-			a.autoLoginSetup.SetError(fmt.Sprintf("Failed to save to keyring: %v", err))
-			return a, nil
+		backend := a.autoLoginSetup.GetBackend()
+		if backend == config.BackendOnePassword {
+			// Nothing to write to 1Password - the user manages that item
+			// themselves. Just remember which item to read from.
+			a.config.AutoLogin.OnePasswordItemName = a.autoLoginSetup.GetItemName()
+		} else {
+			// Save password to keyring
+			if err := keyring.SavePassword(a.masterPassword); err != nil {
+				a.autoLoginSetup.SetError(fmt.Sprintf("Failed to save to keyring: %v", err))
+				return a, nil
+			}
 		}
 
 		// Save config
 		a.config.AutoLogin.Enabled = true
+		a.config.AutoLogin.Backend = backend
 		a.config.AutoLogin.SecurityRules = a.autoLoginSetup.GetRules()
 		autologin.UpdateLoginMetadata(a.config)
 		if err := config.Save(a.storage.GetConfigPath(), a.config); err != nil {
@@ -608,12 +611,12 @@ func (a *App) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch option {
 		case SettingsEnable:
 			// Enable auto-login - go to setup
-			a.autoLoginSetup = NewAutoLoginSetup()
+			a.autoLoginSetup = NewAutoLoginSetup(a.config, a.masterPassword)
 			a.state = StateAutoLoginSetup
 			return a, nil
 		case SettingsReconfigure:
 			// Reconfigure auto-login
-			a.autoLoginSetup = NewAutoLoginSetup()
+			a.autoLoginSetup = NewAutoLoginSetup(a.config, a.masterPassword)
 			a.state = StateAutoLoginSetup
 			return a, nil
 		case SettingsDisable:
@@ -635,6 +638,31 @@ func (a *App) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (a *App) viewSettings() string {
 	return a.settings.View()
+}
+
+// tryAutoLogin verifies password against the stored master key and, if
+// valid, loads connections and transitions to the list state. Returns
+// whether auto-login succeeded (i.e. the password matched).
+func (a *App) tryAutoLogin(password string) bool {
+	valid, err := a.storage.VerifyMasterPassword(password)
+	if err != nil || !valid {
+		return false
+	}
+
+	a.masterPassword = password
+
+	connections, err := a.storage.ListConnections(a.masterPassword)
+	if err != nil {
+		a.err = fmt.Sprintf("Failed to load connections: %v", err)
+		a.connections = []*models.Connection{}
+	} else {
+		a.connections = connections
+	}
+
+	a.list = NewConnectionList(a.connections)
+	a.list.SetSize(a.width, a.height)
+	a.state = StateList
+	return true
 }
 
 // Helper functions

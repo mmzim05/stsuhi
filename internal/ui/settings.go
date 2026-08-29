@@ -108,7 +108,11 @@ func (s Settings) View() string {
 	// Auto-login status
 	b.WriteString(labelStyle.Render("Auto-Login Status: "))
 	if s.config.AutoLogin.Enabled {
-		b.WriteString(successStyle.Render("Enabled"))
+		backendLabel := "OS Keyring"
+		if s.config.AutoLogin.EffectiveBackend() == config.BackendOnePassword {
+			backendLabel = "1Password"
+		}
+		b.WriteString(successStyle.Render(fmt.Sprintf("Enabled (%s)", backendLabel)))
 	} else {
 		b.WriteString(subtitleStyle.Render("Disabled"))
 	}

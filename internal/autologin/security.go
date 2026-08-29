@@ -157,10 +157,13 @@ func UpdateLoginMetadata(cfg *config.Config) error {
 
 // ClearAutoLogin disables auto-login and clears the keyring
 func ClearAutoLogin(cfg *config.Config) error {
-	// Delete from keyring
-	if err := keyring.DeletePassword(); err != nil {
-		// Don't fail if already deleted
-		fmt.Printf("Warning: failed to delete from keyring: %v\n", err)
+	// Only the keyring backend ever has a secret to remove - stsuhi never
+	// writes anything to 1Password itself.
+	if cfg.AutoLogin.EffectiveBackend() == config.BackendKeyring {
+		if err := keyring.DeletePassword(); err != nil {
+			// Don't fail if already deleted
+			fmt.Printf("Warning: failed to delete from keyring: %v\n", err)
+		}
 	}
 
 	// Disable in config
@@ -168,6 +171,8 @@ func ClearAutoLogin(cfg *config.Config) error {
 	cfg.AutoLogin.BootID = ""
 	cfg.AutoLogin.SessionID = ""
 	cfg.AutoLogin.LastLoginTime = time.Time{}
+	cfg.AutoLogin.Backend = config.BackendKeyring
+	cfg.AutoLogin.OnePasswordItemName = ""
 
 	return nil
 }

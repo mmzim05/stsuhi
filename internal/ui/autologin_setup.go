@@ -8,23 +8,52 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"stsuhi/internal/config"
+	"stsuhi/internal/onepassword"
+)
+
+// Row indices within the setup screen. Row 1 (item name) is only navigable
+// when backend == config.BackendOnePassword.
+const (
+	rowBackend = iota
+	rowItemName
+	rowClearOnReboot
+	rowClearOnLock
+	rowClearOnIdle
+	rowNeverClear
+	rowCount
 )
 
 // AutoLoginSetup is the model for the auto-login setup screen
 type AutoLoginSetup struct {
 	rules          config.SecurityRules
+	backend        string
+	masterPassword string
 	selectedRule   int
 	idleHoursInput textinput.Model
+	itemNameInput  textinput.Model
 	err            string
 }
 
-// NewAutoLoginSetup creates a new auto-login setup screen
-func NewAutoLoginSetup() AutoLoginSetup {
+// NewAutoLoginSetup creates a new auto-login setup screen. It prefills the
+// backend and 1Password item name from cfg (used when reconfiguring an
+// already-enabled auto-login), and keeps masterPassword around so the
+// 1Password item can be validated against it before saving.
+func NewAutoLoginSetup(cfg *config.Config, masterPassword string) AutoLoginSetup {
 	ti := textinput.New()
 	ti.Placeholder = "24"
 	ti.CharLimit = 3
 	ti.Width = 10
 	ti.SetValue("24")
+
+	itemName := textinput.New()
+	itemName.Placeholder = onepassword.DefaultItemName
+	itemName.CharLimit = 100
+	itemName.Width = 30
+	if cfg.AutoLogin.OnePasswordItemName != "" {
+		itemName.SetValue(cfg.AutoLogin.OnePasswordItemName)
+	} else {
+		itemName.SetValue(onepassword.DefaultItemName)
+	}
 
 	return AutoLoginSetup{
 		rules: config.SecurityRules{
@@ -34,8 +63,11 @@ func NewAutoLoginSetup() AutoLoginSetup {
 			IdleTimeoutHours: 24,
 			NeverClear:       false,
 		},
-		selectedRule:   0,
+		backend:        cfg.AutoLogin.EffectiveBackend(),
+		masterPassword: masterPassword,
+		selectedRule:   rowBackend,
 		idleHoursInput: ti,
+		itemNameInput:  itemName,
 	}
 }
 
@@ -50,22 +82,23 @@ func (a AutoLoginSetup) Update(msg tea.Msg) (AutoLoginSetup, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "up", "k":
-			if a.selectedRule > 0 {
-				a.selectedRule--
-			}
+			a.navigateUp()
 			return a, nil
 		case "down", "j":
-			if a.selectedRule < 4 {
-				a.selectedRule++
-			}
+			a.navigateDown()
 			return a, nil
 		case " ":
-			// Toggle selected checkbox
-			a.toggleRule()
+			// Toggle selected checkbox / cycle backend
+			a.toggleRow()
 			return a, nil
 		default:
-			// Update idle hours input if that's selected
-			if a.selectedRule == 2 {
+			// Forward typing to whichever input is active
+			if a.selectedRule == rowItemName && a.backend == config.BackendOnePassword {
+				var cmd tea.Cmd
+				a.itemNameInput, cmd = a.itemNameInput.Update(msg)
+				return a, cmd
+			}
+			if a.selectedRule == rowClearOnIdle {
 				var cmd tea.Cmd
 				a.idleHoursInput, cmd = a.idleHoursInput.Update(msg)
 				// Parse and update hours
@@ -82,16 +115,53 @@ func (a AutoLoginSetup) Update(msg tea.Msg) (AutoLoginSetup, tea.Cmd) {
 	return a, nil
 }
 
-// toggleRule toggles the selected security rule
-func (a *AutoLoginSetup) toggleRule() {
+// itemNameRowActive reports whether the item-name row is currently navigable.
+func (a *AutoLoginSetup) itemNameRowActive() bool {
+	return a.backend == config.BackendOnePassword
+}
+
+// navigateUp moves selection up, skipping the item-name row when inactive
+func (a *AutoLoginSetup) navigateUp() {
+	for {
+		if a.selectedRule <= rowBackend {
+			return
+		}
+		a.selectedRule--
+		if a.selectedRule != rowItemName || a.itemNameRowActive() {
+			return
+		}
+	}
+}
+
+// navigateDown moves selection down, skipping the item-name row when inactive
+func (a *AutoLoginSetup) navigateDown() {
+	for {
+		if a.selectedRule >= rowCount-1 {
+			return
+		}
+		a.selectedRule++
+		if a.selectedRule != rowItemName || a.itemNameRowActive() {
+			return
+		}
+	}
+}
+
+// toggleRow handles space on whichever row is selected
+func (a *AutoLoginSetup) toggleRow() {
 	switch a.selectedRule {
-	case 0:
+	case rowBackend:
+		if a.backend == config.BackendOnePassword {
+			a.backend = config.BackendKeyring
+		} else {
+			a.backend = config.BackendOnePassword
+		}
+	case rowClearOnReboot:
 		a.rules.ClearOnReboot = !a.rules.ClearOnReboot
-	case 1:
+	case rowClearOnLock:
 		a.rules.ClearOnLock = !a.rules.ClearOnLock
-	case 2:
+	case rowClearOnIdle:
 		a.rules.ClearOnIdle = !a.rules.ClearOnIdle
-	case 3:
+	case rowNeverClear:
 		a.rules.NeverClear = !a.rules.NeverClear
 		// If "never clear" is selected, uncheck other rules
 		if a.rules.NeverClear {
@@ -102,7 +172,7 @@ func (a *AutoLoginSetup) toggleRule() {
 	}
 
 	// If any other rule is selected, uncheck "never clear"
-	if a.selectedRule != 3 && (a.rules.ClearOnReboot || a.rules.ClearOnLock || a.rules.ClearOnIdle) {
+	if a.selectedRule != rowNeverClear && (a.rules.ClearOnReboot || a.rules.ClearOnLock || a.rules.ClearOnIdle) {
 		a.rules.NeverClear = false
 	}
 }
@@ -113,29 +183,62 @@ func (a AutoLoginSetup) View() string {
 
 	b.WriteString(titleStyle.Render("Configure Auto-Login Security"))
 	b.WriteString("\n\n")
+
+	// Unlock method row
+	b.WriteString(subtitleStyle.Render("Unlock method:"))
+	b.WriteString("\n")
+	backendLabel := "OS Keyring"
+	if a.backend == config.BackendOnePassword {
+		backendLabel = "1Password"
+	}
+	prefix := "  "
+	if a.selectedRule == rowBackend {
+		prefix = "→ "
+		b.WriteString(labelStyle.Render(prefix + "[ " + backendLabel + " ]  (space to switch)"))
+	} else {
+		b.WriteString(prefix + "[ " + backendLabel + " ]")
+	}
+	b.WriteString("\n")
+
+	if a.backend == config.BackendOnePassword {
+		prefix = "  "
+		if a.selectedRule == rowItemName {
+			prefix = "→ "
+			b.WriteString(labelStyle.Render(prefix + "1Password item name: "))
+		} else {
+			b.WriteString(subtitleStyle.Render(prefix + "1Password item name: "))
+		}
+		b.WriteString(a.itemNameInput.View())
+		b.WriteString("\n")
+		b.WriteString(mutedTextStyle.Render("    Looks for a field labeled \"password\" on that item."))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+
 	b.WriteString(subtitleStyle.Render("When should auto-login be cleared?"))
 	b.WriteString("\n\n")
 
 	// Rule options
 	rules := []struct {
+		row     int
 		label   string
 		checked bool
 		desc    string
 	}{
-		{"After system reboot", a.rules.ClearOnReboot, "Re-authenticate after computer restart"},
-		{"After user logout/lock screen", a.rules.ClearOnLock, "Re-authenticate after locking or logging out"},
-		{"After idle timeout", a.rules.ClearOnIdle, "Re-authenticate after inactivity"},
-		{"Never - always persist", a.rules.NeverClear, "Auto-login never expires (least secure)"},
+		{rowClearOnReboot, "After system reboot", a.rules.ClearOnReboot, "Re-authenticate after computer restart"},
+		{rowClearOnLock, "After user logout/lock screen", a.rules.ClearOnLock, "Re-authenticate after locking or logging out"},
+		{rowClearOnIdle, "After idle timeout", a.rules.ClearOnIdle, "Re-authenticate after inactivity"},
+		{rowNeverClear, "Never - always persist", a.rules.NeverClear, "Auto-login never expires (least secure)"},
 	}
 
-	for i, rule := range rules {
+	for _, rule := range rules {
 		checkbox := "[ ]"
 		if rule.checked {
 			checkbox = "[✓]"
 		}
 
 		prefix := "  "
-		if i == a.selectedRule {
+		if rule.row == a.selectedRule {
 			prefix = "→ "
 			b.WriteString(labelStyle.Render(prefix + checkbox + " " + rule.label))
 		} else {
@@ -143,13 +246,13 @@ func (a AutoLoginSetup) View() string {
 		}
 
 		b.WriteString("\n")
-		if i < 3 {
+		if rule.row != rowNeverClear {
 			b.WriteString(mutedTextStyle.Render("    " + rule.desc))
 			b.WriteString("\n")
 		}
 
 		// Show idle timeout input if idle rule is selected
-		if i == 2 && a.selectedRule == 2 {
+		if rule.row == rowClearOnIdle && a.selectedRule == rowClearOnIdle {
 			b.WriteString("\n")
 			b.WriteString(labelStyle.Render("    Timeout hours: "))
 			b.WriteString(a.idleHoursInput.View())
@@ -173,6 +276,19 @@ func (a AutoLoginSetup) GetRules() config.SecurityRules {
 	return a.rules
 }
 
+// GetBackend returns the selected auto-login backend
+func (a AutoLoginSetup) GetBackend() string {
+	return a.backend
+}
+
+// GetItemName returns the entered 1Password item name
+func (a AutoLoginSetup) GetItemName() string {
+	if name := strings.TrimSpace(a.itemNameInput.Value()); name != "" {
+		return name
+	}
+	return onepassword.DefaultItemName
+}
+
 // SetError sets an error message
 func (a *AutoLoginSetup) SetError(err string) {
 	a.err = err
@@ -188,6 +304,23 @@ func (a AutoLoginSetup) Validate() error {
 	// If idle timeout is selected, validate hours
 	if a.rules.ClearOnIdle && a.rules.IdleTimeoutHours <= 0 {
 		return fmt.Errorf("idle timeout hours must be greater than 0")
+	}
+
+	if a.backend == config.BackendOnePassword {
+		itemName := a.GetItemName()
+		if err := onepassword.ValidateItemName(itemName); err != nil {
+			return err
+		}
+		if !onepassword.IsAvailable() {
+			return fmt.Errorf("1password CLI (op) not found in PATH")
+		}
+		password, err := onepassword.GetPassword(itemName)
+		if err != nil {
+			return fmt.Errorf("couldn't read item %q: %w", itemName, err)
+		}
+		if password != a.masterPassword {
+			return fmt.Errorf("1password item %q does not match your stsuhi master password", itemName)
+		}
 	}
 
 	return nil
