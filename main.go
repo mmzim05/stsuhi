@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"time"
@@ -9,15 +10,32 @@ import (
 	"stsuhi/internal/config"
 	"stsuhi/internal/ssh"
 	"stsuhi/internal/storage"
+	"stsuhi/internal/theme"
 	"stsuhi/internal/ui"
 )
 
 func main() {
+	debug := flag.Bool("debug", false, "use a temporary storage directory instead of ~/.config/stsuhi, deleted on exit (for testing first-boot flows without touching real data)")
+	flag.Parse()
+
 	// Initialize storage
-	store, err := storage.NewFileStorage()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error initializing storage: %v\n", err)
-		os.Exit(1)
+	var store *storage.FileStorage
+	var err error
+	if *debug {
+		tmpDir, mkErr := os.MkdirTemp("", "stsuhi-debug-*")
+		if mkErr != nil {
+			fmt.Fprintf(os.Stderr, "Error creating debug storage directory: %v\n", mkErr)
+			os.Exit(1)
+		}
+		defer os.RemoveAll(tmpDir)
+		fmt.Fprintf(os.Stderr, "debug mode: storage at %s (deleted on exit)\n", tmpDir)
+		store = storage.NewFileStorageAt(tmpDir)
+	} else {
+		store, err = storage.NewFileStorage()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error initializing storage: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	// Create storage directory if it doesn't exist
@@ -32,6 +50,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)
 	}
+	store.SetPlainTextMode(cfg.OnePasswordMode)
+	ui.SetTheme(theme.Resolve(cfg.Theme))
 
 	// Main loop - restart TUI after SSH connection ends
 	var masterPassword string

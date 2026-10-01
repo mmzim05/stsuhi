@@ -2,11 +2,13 @@ package ui
 
 import (
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"stsuhi/internal/models"
 )
 
@@ -24,11 +26,60 @@ func (i connectionItem) Description() string {
 	if i.conn.PasskeyPath != "" {
 		authMethod = "key"
 	}
-	return fmt.Sprintf("%s@%s:%d [%s]", i.conn.User, i.conn.Address, i.conn.Port, authMethod)
+	if i.conn.UseSSHAgent {
+		authMethod = "agent"
+	}
+	if i.conn.UseOnePassword {
+		authMethod = "1password"
+	}
+	user := i.conn.User
+	if user == "" && i.conn.UseOnePassword {
+		user = "?"
+	}
+	return fmt.Sprintf("%s@%s:%d [%s]", user, i.conn.Address, i.conn.Port, authMethod)
 }
 
 func (i connectionItem) FilterValue() string {
 	return i.conn.ServerName + " " + i.conn.User + " " + i.conn.Address
+}
+
+// connectionDelegate renders connectionItem rows as a full-width
+// highlighted bar when selected, instead of patching bubbles' default
+// delegate styles (which discards its border/padding setup and causes text
+// to shift horizontally between selected and unselected rows - the bug
+// this replaces). Both branches below use a 2-column-wide prefix so rows
+// never shift, only their color does.
+type connectionDelegate struct{}
+
+func (connectionDelegate) Height() int                         { return 2 }
+func (connectionDelegate) Spacing() int                        { return 1 }
+func (connectionDelegate) Update(tea.Msg, *list.Model) tea.Cmd { return nil }
+
+func (connectionDelegate) Render(w io.Writer, m list.Model, index int, listItem list.Item) {
+	item, ok := listItem.(connectionItem)
+	width := m.Width()
+	if !ok || width <= 0 {
+		return
+	}
+
+	const prefix = "  "
+	const selectedPrefix = "▌ "
+
+	textWidth := width - len(prefix)
+	title := ansi.Truncate(item.Title(), textWidth, "…")
+	desc := ansi.Truncate(item.Description(), textWidth, "…")
+
+	titleStyle, descStyle := listNormalTitleStyle, listNormalDescStyle
+	rowPrefix := prefix
+	if index == m.Index() {
+		titleStyle, descStyle = listSelectedTitleStyle, listSelectedDescStyle
+		rowPrefix = selectedPrefix
+	}
+
+	fmt.Fprintf(w, "%s\n%s",
+		titleStyle.Width(width).Render(rowPrefix+title),
+		descStyle.Width(width).Render(rowPrefix+desc),
+	)
 }
 
 // ConnectionList is a model for the connection list view
@@ -44,15 +95,15 @@ func NewConnectionList(connections []*models.Connection) ConnectionList {
 		items[i] = connectionItem{conn: conn}
 	}
 
-	delegate := list.NewDefaultDelegate()
-	delegate.Styles.SelectedTitle = selectedItemStyle
-	delegate.Styles.SelectedDesc = selectedItemStyle.Copy().Foreground(mutedColor)
-
-	l := list.New(items, delegate, 0, 0)
+	l := list.New(items, connectionDelegate{}, 0, 0)
 	l.Title = "SSH Connections"
+	l.Styles.Title = titleStyle
+	l.Styles.FilterPrompt = labelStyle
+	l.Styles.PaginationStyle = subtitleStyle
+	l.Styles.StatusBar = subtitleStyle
 	l.SetShowStatusBar(true)
 	l.SetFilteringEnabled(true)
-	l.Styles.Title = titleStyle
+	l.SetShowHelp(false) // we render our own help line with the app's real keymap
 
 	return ConnectionList{
 		list: l,

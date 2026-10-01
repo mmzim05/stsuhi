@@ -3,31 +3,38 @@ package models
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
 
 var (
-	ErrEmptyServerName = errors.New("server name cannot be empty")
-	ErrEmptyUser       = errors.New("user cannot be empty")
-	ErrEmptyAddress    = errors.New("address cannot be empty")
-	ErrInvalidPort     = errors.New("port must be between 1 and 65535")
-	ErrNoAuthMethod    = errors.New("either password or passkey path must be provided")
+	ErrEmptyServerName      = errors.New("server name cannot be empty")
+	ErrEmptyUser            = errors.New("user cannot be empty")
+	ErrEmptyAddress         = errors.New("address cannot be empty")
+	ErrInvalidPort          = errors.New("port must be between 1 and 65535")
+	ErrNoAuthMethod         = errors.New("password, passkey path, SSH agent, or 1Password item must be provided")
+	ErrEmptyOnePasswordItem = errors.New("1Password item name cannot be empty")
 )
 
 // Connection represents an SSH connection configuration
 type Connection struct {
-	ID           string    `json:"id"`
-	ServerName   string    `json:"server_name"`
-	User         string    `json:"user"`
-	Address      string    `json:"address"`
-	Port         int       `json:"port"`
-	Password     string    `json:"password,omitempty"`
-	PasskeyPath  string    `json:"passkey_path,omitempty"`
-	SudoPassword string    `json:"sudo_password,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID               string    `json:"id"`
+	ServerName       string    `json:"server_name"`
+	User             string    `json:"user"`
+	Address          string    `json:"address"`
+	Port             int       `json:"port"`
+	Password         string    `json:"password,omitempty"`
+	PasskeyPath      string    `json:"passkey_path,omitempty"`
+	SudoPassword     string    `json:"sudo_password,omitempty"`
+	UseSSHAgent      bool      `json:"use_ssh_agent,omitempty"`
+	SSHAgentSocket   string    `json:"ssh_agent_socket,omitempty"`
+	UseOnePassword   bool      `json:"use_one_password,omitempty"`
+	OnePasswordVault string    `json:"one_password_vault,omitempty"`
+	OnePasswordItem  string    `json:"one_password_item,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // NewConnection creates a new Connection with generated ID and timestamps
@@ -46,7 +53,7 @@ func (c *Connection) Validate() error {
 	if c.ServerName == "" {
 		return ErrEmptyServerName
 	}
-	if c.User == "" {
+	if c.User == "" && !c.UseOnePassword {
 		return ErrEmptyUser
 	}
 	if c.Address == "" {
@@ -55,8 +62,11 @@ func (c *Connection) Validate() error {
 	if c.Port < 1 || c.Port > 65535 {
 		return ErrInvalidPort
 	}
-	if c.Password == "" && c.PasskeyPath == "" {
+	if c.Password == "" && c.PasskeyPath == "" && !c.UseSSHAgent && !c.UseOnePassword {
 		return ErrNoAuthMethod
+	}
+	if c.UseOnePassword && strings.TrimSpace(c.OnePasswordItem) == "" {
+		return ErrEmptyOnePasswordItem
 	}
 	return nil
 }
@@ -72,5 +82,15 @@ func (c *Connection) DisplayString() string {
 	if c.PasskeyPath != "" {
 		authMethod = "key"
 	}
-	return fmt.Sprintf("%s (%s@%s:%d) [%s]", c.ServerName, c.User, c.Address, c.Port, authMethod)
+	if c.UseSSHAgent {
+		authMethod = "agent"
+	}
+	if c.UseOnePassword {
+		authMethod = "1password"
+	}
+	user := c.User
+	if user == "" && c.UseOnePassword {
+		user = "?"
+	}
+	return fmt.Sprintf("%s (%s@%s:%d) [%s]", c.ServerName, user, c.Address, c.Port, authMethod)
 }

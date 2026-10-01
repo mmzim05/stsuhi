@@ -16,20 +16,31 @@ const (
 	fieldPort
 	fieldPassword
 	fieldPasskeyPath
+	fieldUseSSHAgent
+	fieldSSHAgentSocket
+	fieldUseOnePassword
+	fieldOnePasswordVault
+	fieldOnePasswordItem
 	fieldCount
 )
 
 // ConnectionForm is a model for the add/edit connection form
 type ConnectionForm struct {
-	inputs       []textinput.Model
-	focusedField int
-	err          string
-	isEdit       bool
-	originalConn *models.Connection
+	inputs          []textinput.Model
+	focusedField    int
+	err             string
+	isEdit          bool
+	originalConn    *models.Connection
+	useSSHAgent     bool
+	useOnePassword  bool
+	onePasswordMode bool
 }
 
-// NewConnectionForm creates a new connection form
-func NewConnectionForm(conn *models.Connection) ConnectionForm {
+// NewConnectionForm creates a new connection form. onePasswordMode restricts
+// the form to server name/address/port plus a 1Password item reference -
+// used app-wide when config.OnePasswordMode is on, since there is no master
+// password to encrypt a locally-stored username/password/key with.
+func NewConnectionForm(conn *models.Connection, onePasswordMode bool) ConnectionForm {
 	inputs := make([]textinput.Model, fieldCount)
 
 	// Server Name
@@ -64,10 +75,27 @@ func NewConnectionForm(conn *models.Connection) ConnectionForm {
 	inputs[fieldPasskeyPath].Placeholder = "/home/user/.ssh/id_rsa (optional)"
 	inputs[fieldPasskeyPath].CharLimit = 256
 
+	// SSH Agent Socket (only used when useSSHAgent is toggled on)
+	inputs[fieldSSHAgentSocket] = textinput.New()
+	inputs[fieldSSHAgentSocket].Placeholder = "~/.1password/agent.sock (optional, defaults to SSH_AUTH_SOCK)"
+	inputs[fieldSSHAgentSocket].CharLimit = 256
+
+	// 1Password Vault (only used when useOnePassword is toggled on)
+	inputs[fieldOnePasswordVault] = textinput.New()
+	inputs[fieldOnePasswordVault].Placeholder = "Private (optional, searches all vaults if blank)"
+	inputs[fieldOnePasswordVault].CharLimit = 100
+
+	// 1Password Item (only used when useOnePassword is toggled on)
+	inputs[fieldOnePasswordItem] = textinput.New()
+	inputs[fieldOnePasswordItem].Placeholder = "item name storing username + password"
+	inputs[fieldOnePasswordItem].CharLimit = 100
+
 	form := ConnectionForm{
-		inputs:       inputs,
-		focusedField: 0,
-		isEdit:       conn != nil,
+		inputs:          inputs,
+		focusedField:    0,
+		isEdit:          conn != nil,
+		onePasswordMode: onePasswordMode,
+		useOnePassword:  onePasswordMode,
 	}
 
 	// Populate fields if editing
@@ -79,6 +107,13 @@ func NewConnectionForm(conn *models.Connection) ConnectionForm {
 		inputs[fieldPort].SetValue(strconv.Itoa(conn.Port))
 		inputs[fieldPassword].SetValue(conn.Password)
 		inputs[fieldPasskeyPath].SetValue(conn.PasskeyPath)
+		inputs[fieldSSHAgentSocket].SetValue(conn.SSHAgentSocket)
+		inputs[fieldOnePasswordVault].SetValue(conn.OnePasswordVault)
+		inputs[fieldOnePasswordItem].SetValue(conn.OnePasswordItem)
+		form.useSSHAgent = conn.UseSSHAgent
+		if !onePasswordMode {
+			form.useOnePassword = conn.UseOnePassword
+		}
 	} else {
 		inputs[fieldPort].SetValue("22")
 	}
@@ -104,13 +139,24 @@ func (f ConnectionForm) Update(msg tea.Msg) (ConnectionForm, tea.Cmd) {
 		case "shift+tab", "up":
 			f.prevField()
 			return f, nil
+		case " ":
+			switch f.focusedField {
+			case fieldUseSSHAgent:
+				f.useSSHAgent = !f.useSSHAgent
+				return f, nil
+			case fieldUseOnePassword:
+				f.useOnePassword = !f.useOnePassword
+				return f, nil
+			}
 		}
 	}
 
-	// Update focused input
-	var cmd tea.Cmd
-	f.inputs[f.focusedField], cmd = f.inputs[f.focusedField].Update(msg)
-	cmds = append(cmds, cmd)
+	// Update focused input (toggle fields are checkboxes, not text inputs)
+	if !isToggleField(f.focusedField) {
+		var cmd tea.Cmd
+		f.inputs[f.focusedField], cmd = f.inputs[f.focusedField].Update(msg)
+		cmds = append(cmds, cmd)
+	}
 
 	return f, tea.Batch(cmds...)
 }
@@ -126,24 +172,62 @@ func (f ConnectionForm) View() string {
 	}
 	b.WriteString("\n\n")
 
-	labels := []string{
-		"Server Name:",
-		"User:",
-		"Address:",
-		"Port:",
-		"Password:",
-		"Passkey Path:",
-	}
-
-	for i, label := range labels {
-		if i == f.focusedField {
-			b.WriteString(labelStyle.Render("→ " + label))
-		} else {
-			b.WriteString(subtitleStyle.Render("  " + label))
-		}
-		b.WriteString("\n")
-		b.WriteString(f.inputs[i].View())
+	if f.onePasswordMode {
+		b.WriteString(mutedTextStyle.Render("1Password mode: username/password come from 1Password, not stored here."))
 		b.WriteString("\n\n")
+
+		f.renderField(&b, fieldServerName, "Server Name:")
+		b.WriteString("\n\n")
+		f.renderField(&b, fieldAddress, "Address:")
+		b.WriteString("\n\n")
+		f.renderField(&b, fieldPort, "Port:")
+		b.WriteString("\n\n")
+		f.renderField(&b, fieldOnePasswordVault, "1Password Vault:")
+		b.WriteString("\n\n")
+		f.renderField(&b, fieldOnePasswordItem, "1Password Item:")
+		b.WriteString("\n")
+		b.WriteString(mutedTextStyle.Render("    Looks up \"username\" and \"password\" fields on that item at connect time."))
+		b.WriteString("\n\n")
+	} else {
+		labels := []string{
+			"Server Name:",
+			"User:",
+			"Address:",
+			"Port:",
+			"Password:",
+			"Passkey Path:",
+		}
+
+		for i, label := range labels {
+			if i == f.focusedField {
+				b.WriteString(labelStyle.Render("→ " + label))
+			} else {
+				b.WriteString(subtitleStyle.Render("  " + label))
+			}
+			b.WriteString("\n")
+			b.WriteString(f.inputs[i].View())
+			b.WriteString("\n\n")
+		}
+
+		f.renderToggle(&b, fieldUseSSHAgent, "Use SSH agent (1Password)", f.useSSHAgent)
+		b.WriteString("\n\n")
+
+		if f.useSSHAgent {
+			f.renderField(&b, fieldSSHAgentSocket, "Agent Socket:")
+			b.WriteString("\n\n")
+		}
+
+		f.renderToggle(&b, fieldUseOnePassword, "Fetch username/password from 1Password", f.useOnePassword)
+		b.WriteString("\n\n")
+
+		if f.useOnePassword {
+			f.renderField(&b, fieldOnePasswordVault, "1Password Vault:")
+			b.WriteString("\n\n")
+			f.renderField(&b, fieldOnePasswordItem, "1Password Item:")
+			b.WriteString("\n")
+			b.WriteString(mutedTextStyle.Render("    Looks up \"username\" and \"password\" fields on that item at connect time."))
+			b.WriteString("\n\n")
+		}
 	}
 
 	if f.err != "" {
@@ -151,26 +235,102 @@ func (f ConnectionForm) View() string {
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString(helpStyle.Render("tab/shift+tab: navigate • enter: save • esc: cancel"))
+	b.WriteString(helpStyle.Render("tab/shift+tab: navigate • space: toggle • enter: save • esc: cancel"))
 
 	return b.String()
 }
 
-// nextField moves focus to the next field
-func (f *ConnectionForm) nextField() {
-	f.inputs[f.focusedField].Blur()
-	f.focusedField = (f.focusedField + 1) % fieldCount
-	f.inputs[f.focusedField].Focus()
+// isToggleField reports whether a field index is a checkbox rather than a
+// text input.
+func isToggleField(field int) bool {
+	return field == fieldUseSSHAgent || field == fieldUseOnePassword
 }
 
-// prevField moves focus to the previous field
-func (f *ConnectionForm) prevField() {
-	f.inputs[f.focusedField].Blur()
-	f.focusedField--
-	if f.focusedField < 0 {
-		f.focusedField = fieldCount - 1
+// fieldActive reports whether a field is currently navigable: toggle fields
+// always are, but the fields they gate are only reachable while enabled.
+func (f *ConnectionForm) fieldActive(field int) bool {
+	if f.onePasswordMode {
+		switch field {
+		case fieldServerName, fieldAddress, fieldPort, fieldOnePasswordVault, fieldOnePasswordItem:
+			return true
+		default:
+			return false
+		}
 	}
-	f.inputs[f.focusedField].Focus()
+	switch field {
+	case fieldSSHAgentSocket:
+		return f.useSSHAgent
+	case fieldOnePasswordVault, fieldOnePasswordItem:
+		return f.useOnePassword
+	default:
+		return true
+	}
+}
+
+// blurCurrent blurs the currently focused text input, if it is one
+func (f *ConnectionForm) blurCurrent() {
+	if !isToggleField(f.focusedField) {
+		f.inputs[f.focusedField].Blur()
+	}
+}
+
+// focusCurrent focuses the currently focused text input, if it is one
+func (f *ConnectionForm) focusCurrent() {
+	if !isToggleField(f.focusedField) {
+		f.inputs[f.focusedField].Focus()
+	}
+}
+
+// nextField moves focus to the next active field
+func (f *ConnectionForm) nextField() {
+	f.blurCurrent()
+	for {
+		f.focusedField = (f.focusedField + 1) % fieldCount
+		if f.fieldActive(f.focusedField) {
+			break
+		}
+	}
+	f.focusCurrent()
+}
+
+// prevField moves focus to the previous active field
+func (f *ConnectionForm) prevField() {
+	f.blurCurrent()
+	for {
+		f.focusedField--
+		if f.focusedField < 0 {
+			f.focusedField = fieldCount - 1
+		}
+		if f.fieldActive(f.focusedField) {
+			break
+		}
+	}
+	f.focusCurrent()
+}
+
+// renderToggle writes a checkbox row for a boolean field
+func (f *ConnectionForm) renderToggle(b *strings.Builder, field int, label string, checked bool) {
+	box := "[ ]"
+	if checked {
+		box = "[✓]"
+	}
+	row := label + ": " + box
+	if f.focusedField == field {
+		b.WriteString(labelStyle.Render("→ " + row + "  (space to toggle)"))
+	} else {
+		b.WriteString(subtitleStyle.Render("  " + row))
+	}
+}
+
+// renderField writes a labeled text input row
+func (f *ConnectionForm) renderField(b *strings.Builder, field int, label string) {
+	if f.focusedField == field {
+		b.WriteString(labelStyle.Render("→ " + label))
+	} else {
+		b.WriteString(subtitleStyle.Render("  " + label))
+	}
+	b.WriteString("\n")
+	b.WriteString(f.inputs[field].View())
 }
 
 // ToConnection converts form values to a Connection model
@@ -184,10 +344,25 @@ func (f *ConnectionForm) ToConnection() (*models.Connection, error) {
 	}
 
 	conn.ServerName = strings.TrimSpace(f.inputs[fieldServerName].Value())
-	conn.User = strings.TrimSpace(f.inputs[fieldUser].Value())
 	conn.Address = strings.TrimSpace(f.inputs[fieldAddress].Value())
-	conn.Password = f.inputs[fieldPassword].Value()
-	conn.PasskeyPath = strings.TrimSpace(f.inputs[fieldPasskeyPath].Value())
+	conn.OnePasswordVault = strings.TrimSpace(f.inputs[fieldOnePasswordVault].Value())
+	conn.OnePasswordItem = strings.TrimSpace(f.inputs[fieldOnePasswordItem].Value())
+
+	if f.onePasswordMode {
+		conn.User = ""
+		conn.Password = ""
+		conn.PasskeyPath = ""
+		conn.UseSSHAgent = false
+		conn.SSHAgentSocket = ""
+		conn.UseOnePassword = true
+	} else {
+		conn.User = strings.TrimSpace(f.inputs[fieldUser].Value())
+		conn.Password = f.inputs[fieldPassword].Value()
+		conn.PasskeyPath = strings.TrimSpace(f.inputs[fieldPasskeyPath].Value())
+		conn.UseSSHAgent = f.useSSHAgent
+		conn.SSHAgentSocket = strings.TrimSpace(f.inputs[fieldSSHAgentSocket].Value())
+		conn.UseOnePassword = f.useOnePassword
+	}
 
 	portStr := strings.TrimSpace(f.inputs[fieldPort].Value())
 	if portStr == "" {

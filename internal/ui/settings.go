@@ -15,6 +15,7 @@ const (
 	SettingsEnable SettingsOption = iota
 	SettingsReconfigure
 	SettingsDisable
+	SettingsTheme
 	SettingsBack
 )
 
@@ -91,7 +92,7 @@ func (s *Settings) isOptionEnabled(opt SettingsOption) bool {
 		return !s.config.AutoLogin.Enabled
 	case SettingsReconfigure, SettingsDisable:
 		return s.config.AutoLogin.Enabled
-	case SettingsBack:
+	case SettingsTheme, SettingsBack:
 		return true
 	default:
 		return false
@@ -140,6 +141,11 @@ func (s Settings) View() string {
 		b.WriteString("\n")
 	}
 
+	// Theme
+	b.WriteString(labelStyle.Render("Theme: "))
+	b.WriteString(subtitleStyle.Render(ThemeLabel(s.config.Theme)))
+	b.WriteString("\n\n")
+
 	// Menu options
 	b.WriteString(subtitleStyle.Render("Options:"))
 	b.WriteString("\n")
@@ -152,6 +158,7 @@ func (s Settings) View() string {
 		{SettingsEnable, "Enable auto-login", !s.config.AutoLogin.Enabled},
 		{SettingsReconfigure, "Reconfigure auto-login", s.config.AutoLogin.Enabled},
 		{SettingsDisable, "Disable auto-login", s.config.AutoLogin.Enabled},
+		{SettingsTheme, "Change theme", true},
 		{SettingsBack, "Back to connections", true},
 	}
 

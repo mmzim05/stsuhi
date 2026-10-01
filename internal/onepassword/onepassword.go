@@ -2,6 +2,7 @@ package onepassword
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -62,4 +63,65 @@ func GetPassword(itemName string) (string, error) {
 	}
 
 	return strings.TrimSpace(string(output)), nil
+}
+
+// Credential is a username/password pair read from a 1Password item.
+type Credential struct {
+	Username string
+	Password string
+}
+
+// GetCredential looks up the named 1Password item's "username" and
+// "password" fields, so a connection's SSH login can be sourced directly
+// from a 1Password vault item instead of stored locally. If vault is empty,
+// `op` searches all vaults the signed-in account can see. Same non-blocking
+// timeout/no-stdin guard as GetPassword.
+func GetCredential(itemName, vault string) (Credential, error) {
+	if err := ValidateItemName(itemName); err != nil {
+		return Credential{}, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
+	defer cancel()
+
+	args := []string{"item", "get", itemName}
+	if strings.TrimSpace(vault) != "" {
+		args = append(args, "--vault", vault)
+	}
+	args = append(args, "--fields", "label=username,label=password", "--reveal", "--format", "json")
+
+	cmd := exec.CommandContext(ctx, binaryName, args...)
+	cmd.Stdin = nil
+
+	output, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return Credential{}, fmt.Errorf("1password lookup timed out - is the desktop app unlocked?")
+		}
+		return Credential{}, fmt.Errorf("failed to read from 1password: %w", err)
+	}
+
+	var fields []struct {
+		Label string `json:"label"`
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(output, &fields); err != nil {
+		return Credential{}, fmt.Errorf("unexpected response from 1password: %w", err)
+	}
+
+	var cred Credential
+	for _, f := range fields {
+		switch f.Label {
+		case "username":
+			cred.Username = f.Value
+		case "password":
+			cred.Password = f.Value
+		}
+	}
+
+	if cred.Password == "" {
+		return Credential{}, fmt.Errorf("1password item %q has no password field", itemName)
+	}
+
+	return cred, nil
 }

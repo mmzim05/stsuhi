@@ -15,6 +15,12 @@ const (
 	MasterKeyFileName  = "master.key"
 	ConfigFileName     = "config.json"
 	ConnectionFileExt  = ".enc"
+
+	// PlainConnectionFileExt is used instead of ConnectionFileExt when
+	// plainText mode is on (1Password mode), so plaintext and encrypted
+	// connection files never collide if a directory has both from a past
+	// mode switch - each mode only ever sees its own files.
+	PlainConnectionFileExt = ".json"
 )
 
 // FileStorage implements Storage interface using encrypted files
@@ -22,24 +28,46 @@ type FileStorage struct {
 	storageDir     string
 	connectionsDir string
 	masterKeyPath  string
+	plainText      bool
 }
 
-// NewFileStorage creates a new FileStorage instance
+// SetPlainTextMode toggles plaintext (1Password mode) storage. See the
+// Storage interface doc comment.
+func (fs *FileStorage) SetPlainTextMode(plainText bool) {
+	fs.plainText = plainText
+}
+
+// connectionFileExt returns the extension for the currently active mode.
+func (fs *FileStorage) connectionFileExt() string {
+	if fs.plainText {
+		return PlainConnectionFileExt
+	}
+	return ConnectionFileExt
+}
+
+func (fs *FileStorage) connectionFilePath(id string) string {
+	return filepath.Join(fs.connectionsDir, id+fs.connectionFileExt())
+}
+
+// NewFileStorage creates a new FileStorage instance rooted at ~/.config/stsuhi
 func NewFileStorage() (*FileStorage, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get home directory: %w", err)
 	}
 
-	storageDir := filepath.Join(homeDir, ".config", "stsuhi")
-	connectionsDir := filepath.Join(storageDir, ConnectionsDirName)
-	masterKeyPath := filepath.Join(storageDir, MasterKeyFileName)
+	return NewFileStorageAt(filepath.Join(homeDir, ".config", "stsuhi")), nil
+}
 
+// NewFileStorageAt creates a FileStorage instance rooted at an arbitrary
+// directory, bypassing ~/.config/stsuhi. Used by stsuhi's -debug flag to run
+// against a throwaway directory without touching real connections/config.
+func NewFileStorageAt(storageDir string) *FileStorage {
 	return &FileStorage{
 		storageDir:     storageDir,
-		connectionsDir: connectionsDir,
-		masterKeyPath:  masterKeyPath,
-	}, nil
+		connectionsDir: filepath.Join(storageDir, ConnectionsDirName),
+		masterKeyPath:  filepath.Join(storageDir, MasterKeyFileName),
+	}
 }
 
 // InitStorage creates the storage directory structure
@@ -94,7 +122,7 @@ func (fs *FileStorage) VerifyMasterPassword(password string) (bool, error) {
 	return crypto.VerifyPassword(password, string(hashBytes)), nil
 }
 
-// SaveConnection encrypts and saves a connection
+// SaveConnection saves a connection, encrypted unless plainText mode is on
 func (fs *FileStorage) SaveConnection(conn *models.Connection, masterPassword string) error {
 	if err := conn.Validate(); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
@@ -109,27 +137,25 @@ func (fs *FileStorage) SaveConnection(conn *models.Connection, masterPassword st
 		return fmt.Errorf("failed to marshal connection: %w", err)
 	}
 
-	// Encrypt data
-	encrypted, err := crypto.Encrypt(jsonData, masterPassword)
-	if err != nil {
-		return fmt.Errorf("failed to encrypt connection: %w", err)
+	out := jsonData
+	if !fs.plainText {
+		encrypted, err := crypto.Encrypt(jsonData, masterPassword)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt connection: %w", err)
+		}
+		out = []byte(encrypted)
 	}
 
-	// Write to file
-	filePath := filepath.Join(fs.connectionsDir, conn.ID+ConnectionFileExt)
-	if err := os.WriteFile(filePath, []byte(encrypted), 0600); err != nil {
+	if err := os.WriteFile(fs.connectionFilePath(conn.ID), out, 0600); err != nil {
 		return fmt.Errorf("failed to write connection file: %w", err)
 	}
 
 	return nil
 }
 
-// LoadConnection loads and decrypts a connection by ID
+// LoadConnection loads a connection by ID, decrypting unless plainText mode is on
 func (fs *FileStorage) LoadConnection(id string, masterPassword string) (*models.Connection, error) {
-	filePath := filepath.Join(fs.connectionsDir, id+ConnectionFileExt)
-
-	// Read encrypted file
-	encryptedData, err := os.ReadFile(filePath)
+	data, err := os.ReadFile(fs.connectionFilePath(id))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("connection not found: %s", id)
@@ -137,13 +163,14 @@ func (fs *FileStorage) LoadConnection(id string, masterPassword string) (*models
 		return nil, fmt.Errorf("failed to read connection file: %w", err)
 	}
 
-	// Decrypt data
-	jsonData, err := crypto.Decrypt(string(encryptedData), masterPassword)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt connection: %w", err)
+	jsonData := data
+	if !fs.plainText {
+		jsonData, err = crypto.Decrypt(string(data), masterPassword)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt connection: %w", err)
+		}
 	}
 
-	// Deserialize from JSON
 	var conn models.Connection
 	if err := json.Unmarshal(jsonData, &conn); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal connection: %w", err)
@@ -162,13 +189,14 @@ func (fs *FileStorage) ListConnections(masterPassword string) ([]*models.Connect
 		return nil, fmt.Errorf("failed to read connections directory: %w", err)
 	}
 
+	ext := fs.connectionFileExt()
 	var connections []*models.Connection
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ConnectionFileExt {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ext {
 			continue
 		}
 
-		id := entry.Name()[:len(entry.Name())-len(ConnectionFileExt)]
+		id := entry.Name()[:len(entry.Name())-len(ext)]
 		conn, err := fs.LoadConnection(id, masterPassword)
 		if err != nil {
 			// Skip connections that fail to load
@@ -182,8 +210,7 @@ func (fs *FileStorage) ListConnections(masterPassword string) ([]*models.Connect
 
 // DeleteConnection removes a connection by ID
 func (fs *FileStorage) DeleteConnection(id string) error {
-	filePath := filepath.Join(fs.connectionsDir, id+ConnectionFileExt)
-	if err := os.Remove(filePath); err != nil {
+	if err := os.Remove(fs.connectionFilePath(id)); err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("connection not found: %s", id)
 		}
@@ -194,8 +221,7 @@ func (fs *FileStorage) DeleteConnection(id string) error {
 
 // ConnectionExists checks if a connection with the given ID exists
 func (fs *FileStorage) ConnectionExists(id string) (bool, error) {
-	filePath := filepath.Join(fs.connectionsDir, id+ConnectionFileExt)
-	_, err := os.Stat(filePath)
+	_, err := os.Stat(fs.connectionFilePath(id))
 	if os.IsNotExist(err) {
 		return false, nil
 	}

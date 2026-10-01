@@ -37,6 +37,18 @@ const (
 // Config represents the application configuration
 type Config struct {
 	AutoLogin AutoLoginConfig `json:"auto_login"`
+
+	// OnePasswordMode, once enabled, skips the master password entirely:
+	// connections are stored in plaintext (no encryption key without a
+	// master password) and every connection only stores a 1Password item
+	// reference, never a local username/password/key. Set once at first
+	// boot; see internal/ui onePasswordPrompt/onePasswordInfo states.
+	OnePasswordMode bool `json:"one_password_mode,omitempty"`
+
+	// Theme selects the UI color palette: "" (adaptive built-in default),
+	// "omarchy" (follow the desktop's current Omarchy theme), or
+	// "omarchy:<slug>" (one specific Omarchy theme). See internal/theme.
+	Theme string `json:"theme,omitempty"`
 }
 
 // EffectiveBackend returns the configured auto-login backend, treating an

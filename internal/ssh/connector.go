@@ -13,10 +13,19 @@ import (
 
 	"github.com/creack/pty"
 	"stsuhi/internal/models"
+	"stsuhi/internal/onepassword"
 )
 
 // Connect launches an SSH session using the provided connection details
 func Connect(conn *models.Connection) error {
+	if conn.UseOnePassword {
+		resolved, err := resolveOnePasswordCredential(conn)
+		if err != nil {
+			return err
+		}
+		conn = resolved
+	}
+
 	// If we have a password, use PTY-based connection for auto-fill
 	if conn.Password != "" {
 		return connectWithPTY(conn)
@@ -34,6 +43,28 @@ func Connect(conn *models.Connection) error {
 	}
 
 	return nil
+}
+
+// resolveOnePasswordCredential fetches the username/password for a
+// 1Password-backed connection and returns a copy of conn with them filled
+// in, leaving the original (and its stored connection file) untouched.
+func resolveOnePasswordCredential(conn *models.Connection) (*models.Connection, error) {
+	if !onepassword.IsAvailable() {
+		return nil, fmt.Errorf("1password CLI (op) not found in PATH")
+	}
+
+	cred, err := onepassword.GetCredential(conn.OnePasswordItem, conn.OnePasswordVault)
+	if err != nil {
+		return nil, fmt.Errorf("1password lookup failed: %w", err)
+	}
+
+	resolved := *conn
+	if cred.Username != "" {
+		resolved.User = cred.Username
+	}
+	resolved.Password = cred.Password
+
+	return &resolved, nil
 }
 
 // connectWithPTY handles SSH connection with automatic password input
@@ -119,8 +150,8 @@ func connectWithPTY(conn *models.Connection) error {
 				// Check for sudo password prompts that match the SSH user
 				// Format: "[sudo] password for username:"
 				if strings.Contains(output, "[sudo]") &&
-				   strings.Contains(output, "password") &&
-				   strings.Contains(output, sshUser) {
+					strings.Contains(output, "password") &&
+					strings.Contains(output, sshUser) {
 					ptmx.Write([]byte(conn.Password + "\n"))
 					outputBuffer.Reset()
 					continue
@@ -196,6 +227,12 @@ func buildSSHArgs(conn *models.Connection) []string {
 	// Add identity file if using key authentication
 	if conn.PasskeyPath != "" {
 		args = append(args, "-i", conn.PasskeyPath)
+	}
+
+	// Point ssh at a specific agent socket (e.g. 1Password's SSH agent)
+	// instead of relying on SSH_AUTH_SOCK / ~/.ssh/config
+	if conn.UseSSHAgent && conn.SSHAgentSocket != "" {
+		args = append(args, "-o", fmt.Sprintf("IdentityAgent=%s", conn.SSHAgentSocket))
 	}
 
 	// Add user@host

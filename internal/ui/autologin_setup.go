@@ -325,6 +325,3 @@ func (a AutoLoginSetup) Validate() error {
 
 	return nil
 }
-
-// Helper style for muted text
-var mutedTextStyle = subtitleStyle
