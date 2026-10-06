@@ -35,6 +35,21 @@ type Connection struct {
 	OnePasswordItem  string    `json:"one_password_item,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
+
+	// HasStoredSecret, HasPasskey, and Locked are in-memory-only metadata
+	// set by the storage layer, never serialized by it directly:
+	//   - HasStoredSecret: this connection has a locally-encrypted secret
+	//     at all (regardless of whether it's currently decrypted).
+	//   - HasPasskey: that secret includes a passkey path, not just a
+	//     password - kept in the clear even when sealed, purely so the
+	//     list can show "key" vs "password" without unlocking.
+	//   - Locked: a secret exists but wasn't decrypted (no/wrong master
+	//     password was given) - ServerName/User/Address/Port are
+	//     placeholders, not real values, because those are sealed
+	//     together with the secret. See storage.FileStorage.
+	HasStoredSecret bool `json:"-"`
+	HasPasskey      bool `json:"-"`
+	Locked          bool `json:"-"`
 }
 
 // NewConnection creates a new Connection with generated ID and timestamps
@@ -48,6 +63,15 @@ func NewConnection() *Connection {
 	}
 }
 
+// HasLocalSecret reports whether this connection currently holds secret
+// material (typed password/passkey path/sudo password) that needs to be
+// encrypted with a master password before it can be saved. Distinct from
+// HasStoredSecret, which reflects what's already on disk for a previously
+// saved connection, not what's in these fields right now.
+func (c *Connection) HasLocalSecret() bool {
+	return c.Password != "" || c.PasskeyPath != "" || c.SudoPassword != ""
+}
+
 // Validate checks if the connection has all required fields
 func (c *Connection) Validate() error {
 	if c.ServerName == "" {
@@ -56,13 +80,19 @@ func (c *Connection) Validate() error {
 	if c.User == "" && !c.UseOnePassword {
 		return ErrEmptyUser
 	}
-	if c.Address == "" {
+	// 1Password can supply the address too (see ssh.resolveOnePasswordCredential),
+	// so a 1Password-backed connection doesn't have to store one locally.
+	if c.Address == "" && !c.UseOnePassword {
 		return ErrEmptyAddress
 	}
 	if c.Port < 1 || c.Port > 65535 {
 		return ErrInvalidPort
 	}
-	if c.Password == "" && c.PasskeyPath == "" && !c.UseSSHAgent && !c.UseOnePassword {
+	// Locked (not yet decrypted) connections have blank Password/
+	// PasskeyPath even though a secret exists - HasStoredSecret covers
+	// that case so a locked entry doesn't fail validation if re-saved
+	// without being unlocked first.
+	if c.Password == "" && c.PasskeyPath == "" && !c.UseSSHAgent && !c.UseOnePassword && !c.HasStoredSecret {
 		return ErrNoAuthMethod
 	}
 	if c.UseOnePassword && strings.TrimSpace(c.OnePasswordItem) == "" {
@@ -79,7 +109,7 @@ func (c *Connection) Update() {
 // DisplayString returns a formatted string for display in the UI
 func (c *Connection) DisplayString() string {
 	authMethod := "password"
-	if c.PasskeyPath != "" {
+	if c.PasskeyPath != "" || c.HasPasskey {
 		authMethod = "key"
 	}
 	if c.UseSSHAgent {

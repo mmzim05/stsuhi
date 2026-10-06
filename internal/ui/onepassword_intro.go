@@ -2,11 +2,11 @@ package ui
 
 import "strings"
 
-// onePasswordSetupInstructions is the static walkthrough shown to a user who
-// enables 1Password mode at first boot. It covers what stsuhi itself needs
-// (the `op` CLI plus the desktop app's CLI-integration setting) and the
-// parts that are the user's/`op`'s responsibility, not stsuhi's, so the two
-// don't get conflated when something doesn't work.
+// onePasswordSetupInstructions is the static walkthrough shown from
+// Settings -> "1Password setup instructions". It covers what stsuhi itself
+// needs (the `op` CLI plus the desktop app's CLI-integration setting) and
+// the parts that are the user's/`op`'s responsibility, not stsuhi's, so the
+// two don't get conflated when something doesn't work.
 const onePasswordSetupInstructions = `1) Install the 1Password desktop app and CLI ("op").
    Arch/Omarchy: both ship in the AUR/official packages, e.g.
      yay -S 1password 1password-cli
@@ -26,37 +26,23 @@ const onePasswordSetupInstructions = `1) Install the 1Password desktop app and C
 
 5) For each server, create a Login item with "username" and "password"
    fields - stsuhi will ask for that item's name (and vault, if you use
-   more than one) when you add the connection, and looks the credentials
-   up at connect time. Nothing is ever written back to 1Password.`
+   more than one) when you toggle "Fetch username/password from
+   1Password" on a connection, and looks the credentials up at connect
+   time. Nothing is ever written back to 1Password.
 
-func viewOnePasswordPromptBody() string {
-	var b strings.Builder
-	b.WriteString(titleStyle.Render("Enable 1Password Mode?"))
-	b.WriteString("\n\n")
-	b.WriteString(subtitleStyle.Render("1Password mode skips the master password entirely: connections"))
-	b.WriteString("\n")
-	b.WriteString(subtitleStyle.Render("are stored in plaintext (no password to derive an encryption key"))
-	b.WriteString("\n")
-	b.WriteString(subtitleStyle.Render("from), and each one only stores a 1Password item reference -"))
-	b.WriteString("\n")
-	b.WriteString(subtitleStyle.Render("no local username, password, or SSH key fields. Credentials are"))
-	b.WriteString("\n")
-	b.WriteString(subtitleStyle.Render("fetched from 1Password via the op CLI each time you connect."))
-	b.WriteString("\n\n")
-	b.WriteString(labelStyle.Render("[Y]"))
-	b.WriteString(" Yes, enable 1Password mode (see setup steps)\n")
-	b.WriteString(labelStyle.Render("[N]"))
-	b.WriteString(" No, use a master password with encrypted storage\n\n")
-	b.WriteString(helpStyle.Render("y: yes • n: no • esc: quit"))
-	return b.String()
-}
+6) Optional: add a custom text field labeled "url", formatted as
+   "address:port" (port optional, e.g. "10.0.0.5:2222" or just
+   "10.0.0.5"). If present, stsuhi uses it instead of whatever's typed
+   locally - leave the connection's Address field blank and nothing about
+   that server (host, port, or credentials) is ever stored on this
+   machine, only the item/vault reference needed to look it up.`
 
 func viewOnePasswordInfoBody() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("1Password Mode Setup"))
+	b.WriteString(titleStyle.Render("1Password Setup Instructions"))
 	b.WriteString("\n\n")
 	b.WriteString(mutedTextStyle.Render(onePasswordSetupInstructions))
 	b.WriteString("\n\n")
-	b.WriteString(helpStyle.Render("enter: enable 1Password mode & continue • esc: back"))
+	b.WriteString(helpStyle.Render("enter/esc: back to settings"))
 	return b.String()
 }

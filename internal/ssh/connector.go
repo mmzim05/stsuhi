@@ -45,9 +45,14 @@ func Connect(conn *models.Connection) error {
 	return nil
 }
 
-// resolveOnePasswordCredential fetches the username/password for a
-// 1Password-backed connection and returns a copy of conn with them filled
-// in, leaving the original (and its stored connection file) untouched.
+// resolveOnePasswordCredential fetches the username/password (and,
+// optionally, address/port) for a 1Password-backed connection and returns
+// a copy of conn with them filled in, leaving the original (and its stored
+// connection file) untouched. 1Password's values win over whatever's
+// stored locally when both are present, same as username has always
+// worked - so a connection can leave address/port blank locally and have
+// them resolved here instead, keeping nothing but the item/vault
+// reference on disk.
 func resolveOnePasswordCredential(conn *models.Connection) (*models.Connection, error) {
 	if !onepassword.IsAvailable() {
 		return nil, fmt.Errorf("1password CLI (op) not found in PATH")
@@ -62,7 +67,19 @@ func resolveOnePasswordCredential(conn *models.Connection) (*models.Connection, 
 	if cred.Username != "" {
 		resolved.User = cred.Username
 	}
+	if cred.Address != "" {
+		resolved.Address = cred.Address
+	}
+	if cred.Port != "" {
+		if port, err := strconv.Atoi(cred.Port); err == nil && port > 0 {
+			resolved.Port = port
+		}
+	}
 	resolved.Password = cred.Password
+
+	if resolved.Address == "" {
+		return nil, fmt.Errorf("1password item %q has no address and none is stored locally", conn.OnePasswordItem)
+	}
 
 	return &resolved, nil
 }

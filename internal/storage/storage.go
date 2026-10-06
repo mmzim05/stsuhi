@@ -7,12 +7,6 @@ type Storage interface {
 	// InitStorage creates the storage directory structure
 	InitStorage() error
 
-	// SetPlainTextMode toggles whether SaveConnection/LoadConnection/
-	// ListConnections read and write plaintext JSON instead of encrypting
-	// with the master password (used by 1Password mode, which has no
-	// master password to derive an encryption key from).
-	SetPlainTextMode(plainText bool)
-
 	// IsMasterPasswordSet checks if a master password has been configured
 	IsMasterPasswordSet() (bool, error)
 
@@ -22,13 +16,21 @@ type Storage interface {
 	// VerifyMasterPassword checks if the provided password matches the stored hash
 	VerifyMasterPassword(password string) (bool, error)
 
-	// SaveConnection encrypts and saves a connection
+	// SaveConnection writes a connection's metadata in the clear and
+	// encrypts any local secret (password/passkey/sudo password) with
+	// masterPassword. masterPassword may be "" if the connection has no
+	// local secret to encrypt, or if an existing encrypted secret is being
+	// carried forward unchanged - see FileStorage.SaveConnection.
 	SaveConnection(conn *models.Connection, masterPassword string) error
 
-	// LoadConnection loads and decrypts a connection by ID
+	// LoadConnection loads a connection by ID, decrypting its secret (if
+	// any) with masterPassword. Returns ErrMasterPasswordRequired alongside
+	// the metadata-only connection if it has a secret but masterPassword
+	// is "".
 	LoadConnection(id string, masterPassword string) (*models.Connection, error)
 
-	// ListConnections loads all connections
+	// ListConnections loads every connection's metadata. Never requires
+	// a master password - secrets are never decrypted for listing.
 	ListConnections(masterPassword string) ([]*models.Connection, error)
 
 	// DeleteConnection removes a connection by ID

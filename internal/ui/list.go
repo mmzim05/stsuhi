@@ -18,12 +18,19 @@ type connectionItem struct {
 }
 
 func (i connectionItem) Title() string {
+	if i.conn.Locked {
+		return "🔒 Locked"
+	}
 	return i.conn.ServerName
 }
 
 func (i connectionItem) Description() string {
+	if i.conn.Locked {
+		return "password-protected - select to unlock"
+	}
+
 	authMethod := "password"
-	if i.conn.PasskeyPath != "" {
+	if i.conn.PasskeyPath != "" || i.conn.HasPasskey {
 		authMethod = "key"
 	}
 	if i.conn.UseSSHAgent {

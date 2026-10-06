@@ -65,16 +65,25 @@ func GetPassword(itemName string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-// Credential is a username/password pair read from a 1Password item.
+// Credential is everything a connection can source from a 1Password item:
+// not just username/password, but optionally the host/port too, so a
+// fully 1Password-backed connection can leave nothing but the item/vault
+// reference stored locally. Address and Port come from an optional custom
+// text field labeled "url", formatted as "address:port" (port optional) -
+// most Login items won't have it, and that's fine, callers fall back to
+// whatever's stored locally in that case.
 type Credential struct {
 	Username string
 	Password string
+	Address  string
+	Port     string // raw string from 1Password; empty if the "url" field had no port
 }
 
-// GetCredential looks up the named 1Password item's "username" and
-// "password" fields, so a connection's SSH login can be sourced directly
-// from a 1Password vault item instead of stored locally. If vault is empty,
-// `op` searches all vaults the signed-in account can see. Same non-blocking
+// GetCredential looks up the named 1Password item's "username", "password",
+// and optional "url" ("address:port") fields, so a connection's SSH login
+// (and, optionally, its host/port) can be sourced directly from a
+// 1Password vault item instead of stored locally. If vault is empty, `op`
+// searches all vaults the signed-in account can see. Same non-blocking
 // timeout/no-stdin guard as GetPassword.
 func GetCredential(itemName, vault string) (Credential, error) {
 	if err := ValidateItemName(itemName); err != nil {
@@ -88,7 +97,7 @@ func GetCredential(itemName, vault string) (Credential, error) {
 	if strings.TrimSpace(vault) != "" {
 		args = append(args, "--vault", vault)
 	}
-	args = append(args, "--fields", "label=username,label=password", "--reveal", "--format", "json")
+	args = append(args, "--fields", "label=username,label=password,label=url", "--reveal", "--format", "json")
 
 	cmd := exec.CommandContext(ctx, binaryName, args...)
 	cmd.Stdin = nil
@@ -116,6 +125,8 @@ func GetCredential(itemName, vault string) (Credential, error) {
 			cred.Username = f.Value
 		case "password":
 			cred.Password = f.Value
+		case "url":
+			cred.Address, cred.Port = parseAddressPort(f.Value)
 		}
 	}
 
@@ -124,4 +135,14 @@ func GetCredential(itemName, vault string) (Credential, error) {
 	}
 
 	return cred, nil
+}
+
+// parseAddressPort splits a "url" field value formatted as "address:port"
+// (port optional) into its two parts.
+func parseAddressPort(value string) (address, port string) {
+	value = strings.TrimSpace(value)
+	if idx := strings.LastIndex(value, ":"); idx >= 0 {
+		return value[:idx], value[idx+1:]
+	}
+	return value, ""
 }

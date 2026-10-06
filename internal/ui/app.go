@@ -18,14 +18,13 @@ import (
 type AppState int
 
 const (
-	StateFirstBoot AppState = iota
+	StateFirstBoot AppState = iota // create a master password (triggered on demand, not at boot)
 	StateFirstBootConfirm
-	StateOnePasswordPrompt
-	StateOnePasswordInfo
-	StateLogin
+	StateLogin // enter an existing master password (triggered on demand)
 	StateAutoLoginPrompt
 	StateAutoLoginSetup
 	StateSettings
+	StateOnePasswordHelp // 1Password setup instructions, purely informational
 	StateThemePicker
 	StateList
 	StateAdd
@@ -33,6 +32,19 @@ const (
 	StateDelete
 	StateConnecting
 	StateQuitting
+)
+
+// pendingAction records what to do once a master password becomes
+// available, since obtaining one is now a detour (StateFirstBoot/
+// StateLogin) off whatever the user was actually doing, not a boot-time
+// gate. See beginMasterPasswordPrompt and afterAuthSuccess.
+type pendingAction int
+
+const (
+	pendingNone pendingAction = iota
+	pendingSaveConnection
+	pendingConnect
+	pendingEdit
 )
 
 // App is the main application model
@@ -55,6 +67,13 @@ type App struct {
 	width             int
 	height            int
 	keyringAvailable  bool
+
+	// Lazy master-password flow state - see beginMasterPasswordPrompt.
+	pendingAction      pendingAction
+	pendingFormConn    *models.Connection
+	pendingConnectConn *models.Connection
+	pendingEditConn    *models.Connection
+	pendingReturnState AppState
 }
 
 // NewApp creates a new application instance
@@ -80,65 +99,46 @@ func NewAppWithPassword(store storage.Storage, cfg *config.Config, masterPasswor
 	}
 }
 
-// Init initializes the application
+// Init initializes the application. There is no master-password gate here
+// any more: connections are listed as metadata only (see
+// storage.Storage.ListConnections), which never requires one. A master
+// password is only ever asked for later, on demand, by
+// beginMasterPasswordPrompt - when saving a connection with a typed
+// password/passkey, or connecting to one that already has one stored.
 func (a *App) Init() tea.Cmd {
-	// 1Password mode has no master password at all - never gate on one.
-	if a.config.OnePasswordMode {
-		connections, err := a.storage.ListConnections("")
-		if err != nil {
-			a.err = fmt.Sprintf("Failed to load connections: %v", err)
-			connections = []*models.Connection{}
-		}
-		a.connections = connections
-		a.list = NewConnectionList(a.connections)
-		a.list.SetSize(a.width, a.height)
-		a.state = StateList
-		return nil
+	if a.masterPassword == "" {
+		a.tryCachedMasterPassword() // silent, best-effort - never blocks startup
 	}
 
-	// If already authenticated (returning from SSH), skip login
-	if a.masterPassword != "" {
-		// Load connections and go to list
-		connections, err := a.storage.ListConnections(a.masterPassword)
-		if err != nil {
-			a.err = fmt.Sprintf("Failed to load connections: %v", err)
-			// Initialize empty list to avoid crashes
-			a.connections = []*models.Connection{}
-			a.list = NewConnectionList(a.connections)
-			a.list.SetSize(a.width, a.height)
-			a.state = StateList
-			return nil
-		}
-
-		a.connections = connections
-		a.list = NewConnectionList(a.connections)
-		a.list.SetSize(a.width, a.height)
-		a.state = StateList
-		return nil
-	}
-
-	// Check if this is first boot
-	isSet, err := a.storage.IsMasterPasswordSet()
+	connections, err := a.storage.ListConnections(a.masterPassword)
 	if err != nil {
-		a.err = fmt.Sprintf("Failed to check master password: %v", err)
-		a.state = StateQuitting
-		return tea.Quit
+		a.err = fmt.Sprintf("Failed to load connections: %v", err)
+		connections = []*models.Connection{}
+	}
+	a.connections = connections
+	a.list = NewConnectionList(a.connections)
+	a.list.SetSize(a.width, a.height)
+	a.state = StateList
+	return nil
+}
+
+// tryCachedMasterPassword attempts to silently recover a previously-saved
+// master password from the configured auto-login backend (OS keyring or
+// 1Password), the same way login used to happen automatically at startup.
+// Never prompts; just leaves a.masterPassword empty on failure. Returns
+// whether a.masterPassword is now set.
+func (a *App) tryCachedMasterPassword() bool {
+	if a.masterPassword != "" {
+		return true
 	}
 
-	if !isSet {
-		// First boot - ask whether to skip the master password entirely
-		// via 1Password mode before ever setting one up.
-		a.state = StateOnePasswordPrompt
-		return nil
-	}
-
-	// Try auto-login according to the configured backend
 	switch a.config.AutoLogin.EffectiveBackend() {
 	case config.BackendOnePassword:
 		if onepassword.IsAvailable() {
 			if password, err := onepassword.GetPassword(a.config.AutoLogin.OnePasswordItemName); err == nil {
-				if a.tryAutoLogin(password) {
-					return nil
+				if valid, _ := a.storage.VerifyMasterPassword(password); valid {
+					a.masterPassword = password
+					return true
 				}
 			}
 		}
@@ -148,7 +148,6 @@ func (a *App) Init() tea.Cmd {
 			// Check if boot ID has changed (reboot detection)
 			currentBootID, err := autologin.GetBootID()
 			if err == nil {
-				// If boot ID changed, clear keyring
 				if a.config.AutoLogin.BootID != "" && a.config.AutoLogin.BootID != currentBootID {
 					keyring.DeletePassword()
 					a.config.AutoLogin.BootID = currentBootID
@@ -156,25 +155,116 @@ func (a *App) Init() tea.Cmd {
 				}
 			}
 
-			// Try to get password from keyring
-			password, keyringErr := keyring.GetPassword()
-			if keyringErr == nil {
-				if a.tryAutoLogin(password) {
-					// Update boot ID
+			if password, err := keyring.GetPassword(); err == nil {
+				if valid, _ := a.storage.VerifyMasterPassword(password); valid {
+					a.masterPassword = password
 					if currentBootID != "" {
 						a.config.AutoLogin.BootID = currentBootID
 						config.Save(a.storage.GetConfigPath(), a.config)
 					}
-					return nil
+					return true
 				}
 			}
 		}
 	}
 
-	// Login required
-	a.state = StateLogin
-	a.passwordInput = NewPasswordInput("Master Password:", "Enter your master password")
-	return a.passwordInput.Init()
+	return false
+}
+
+// beginMasterPasswordPrompt transitions to the password-entry/creation
+// flow, remembering what to do once a password is available (action) and
+// where to return to if the user cancels (returnState).
+func (a *App) beginMasterPasswordPrompt(action pendingAction, returnState AppState) (tea.Model, tea.Cmd) {
+	a.pendingAction = action
+	a.pendingReturnState = returnState
+	a.err = ""
+
+	isSet, err := a.storage.IsMasterPasswordSet()
+	if err != nil {
+		a.err = fmt.Sprintf("Failed to check master password: %v", err)
+		a.pendingAction = pendingNone
+		a.state = returnState
+		return a, nil
+	}
+
+	if isSet {
+		a.state = StateLogin
+		a.passwordInput = NewPasswordInput("Master Password:", "Enter your master password")
+		return a, a.passwordInput.Init()
+	}
+
+	a.state = StateFirstBoot
+	a.passwordInput = NewPasswordInput("Create Master Password:", "Enter a strong password")
+	return a, a.passwordInput.Init()
+}
+
+// cancelMasterPasswordPrompt abandons whatever triggered
+// beginMasterPasswordPrompt and returns to where the user was.
+func (a *App) cancelMasterPasswordPrompt() (tea.Model, tea.Cmd) {
+	a.pendingAction = pendingNone
+	a.pendingFormConn = nil
+	a.pendingConnectConn = nil
+	a.pendingEditConn = nil
+	a.state = a.pendingReturnState
+	return a, nil
+}
+
+// afterAuthSuccess runs once a master password has just been created or
+// verified: it caches the password for auto-login the same way a
+// successful login always has, then carries out whatever was pending.
+func (a *App) afterAuthSuccess() (tea.Model, tea.Cmd) {
+	if a.keyringAvailable {
+		keyring.SavePassword(a.masterPassword)
+		if bootID, err := autologin.GetBootID(); err == nil {
+			a.config.AutoLogin.BootID = bootID
+			config.Save(a.storage.GetConfigPath(), a.config)
+		}
+	}
+
+	switch a.pendingAction {
+	case pendingSaveConnection:
+		conn := a.pendingFormConn
+		a.pendingAction = pendingNone
+		a.pendingFormConn = nil
+		if err := a.storage.SaveConnection(conn, a.masterPassword); err != nil {
+			a.err = fmt.Sprintf("Failed to save: %v", err)
+			a.state = StateList
+			return a, nil
+		}
+		a.reloadConnections()
+		a.state = StateList
+		return a, nil
+
+	case pendingConnect:
+		target := a.pendingConnectConn
+		a.pendingAction = pendingNone
+		a.pendingConnectConn = nil
+		full, err := a.storage.LoadConnection(target.ID, a.masterPassword)
+		if err != nil {
+			a.err = fmt.Sprintf("Failed to decrypt connection: %v", err)
+			a.state = StateList
+			return a, nil
+		}
+		return a, a.connectSSH(full)
+
+	case pendingEdit:
+		target := a.pendingEditConn
+		a.pendingAction = pendingNone
+		a.pendingEditConn = nil
+		full, err := a.storage.LoadConnection(target.ID, a.masterPassword)
+		if err != nil {
+			a.err = fmt.Sprintf("Failed to decrypt connection: %v", err)
+			a.state = StateList
+			return a, nil
+		}
+		a.state = StateEdit
+		a.form = NewConnectionForm(full)
+		return a, a.form.Init()
+
+	default:
+		a.state = StateList
+		return a, nil
+	}
 }
 
 // Update updates the application state
@@ -194,10 +284,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.updateFirstBoot(msg)
 		case StateFirstBootConfirm:
 			return a.updateFirstBootConfirm(msg)
-		case StateOnePasswordPrompt:
-			return a.updateOnePasswordPrompt(msg)
-		case StateOnePasswordInfo:
-			return a.updateOnePasswordInfo(msg)
 		case StateLogin:
 			return a.updateLogin(msg)
 		case StateAutoLoginPrompt:
@@ -206,6 +292,8 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.updateAutoLoginSetup(msg)
 		case StateSettings:
 			return a.updateSettings(msg)
+		case StateOnePasswordHelp:
+			return a.updateOnePasswordHelp(msg)
 		case StateThemePicker:
 			return a.updateThemePicker(msg)
 		case StateList:
@@ -231,10 +319,6 @@ func (a *App) View() string {
 		return a.viewFirstBoot()
 	case StateFirstBootConfirm:
 		return a.viewFirstBootConfirm()
-	case StateOnePasswordPrompt:
-		return viewOnePasswordPromptBody()
-	case StateOnePasswordInfo:
-		return viewOnePasswordInfoBody()
 	case StateLogin:
 		return a.viewLogin()
 	case StateAutoLoginPrompt:
@@ -243,6 +327,8 @@ func (a *App) View() string {
 		return a.viewAutoLoginSetup()
 	case StateSettings:
 		return a.viewSettings()
+	case StateOnePasswordHelp:
+		return viewOnePasswordInfoBody()
 	case StateThemePicker:
 		return a.viewThemePicker()
 	case StateList:
@@ -258,12 +344,12 @@ func (a *App) View() string {
 	}
 }
 
-// First Boot State
+// First Boot State (create a master password) - reached only via
+// beginMasterPasswordPrompt now, never at startup.
 func (a *App) updateFirstBoot(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc":
-		a.state = StateQuitting
-		return a, tea.Quit
+		return a.cancelMasterPasswordPrompt()
 	case "enter":
 		password := a.passwordInput.Value()
 		if len(password) < 8 {
@@ -271,6 +357,7 @@ func (a *App) updateFirstBoot(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.masterPassword = password
+		a.err = ""
 		a.state = StateFirstBootConfirm
 		a.confirmPassword = NewPasswordInput("Confirm Master Password:", "Re-enter your password")
 		return a, a.confirmPassword.Init()
@@ -283,11 +370,11 @@ func (a *App) updateFirstBoot(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (a *App) viewFirstBoot() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("SSH Connection Manager - First Boot"))
+	b.WriteString(titleStyle.Render("Create Master Password"))
 	b.WriteString("\n\n")
-	b.WriteString(subtitleStyle.Render("Welcome! Let's set up your master password."))
+	b.WriteString(subtitleStyle.Render("This password encrypts the password/key you just entered."))
 	b.WriteString("\n")
-	b.WriteString(subtitleStyle.Render("This password will encrypt all your SSH connections."))
+	b.WriteString(subtitleStyle.Render("Connections using only 1Password or an SSH agent never need one."))
 	b.WriteString("\n\n")
 	b.WriteString(a.passwordInput.View())
 	b.WriteString("\n\n")
@@ -295,7 +382,7 @@ func (a *App) viewFirstBoot() string {
 		b.WriteString(errorStyle.Render(a.err))
 		b.WriteString("\n\n")
 	}
-	b.WriteString(helpStyle.Render("enter: continue • esc: quit"))
+	b.WriteString(helpStyle.Render("enter: continue • esc: cancel"))
 	return b.String()
 }
 
@@ -303,10 +390,7 @@ func (a *App) viewFirstBoot() string {
 func (a *App) updateFirstBootConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc":
-		a.state = StateFirstBoot
-		a.passwordInput = NewPasswordInput("Create Master Password:", "Enter a strong password")
-		a.err = ""
-		return a, a.passwordInput.Init()
+		return a.cancelMasterPasswordPrompt()
 	case "enter":
 		confirmPassword := a.confirmPassword.Value()
 		if confirmPassword != a.masterPassword {
@@ -316,34 +400,16 @@ func (a *App) updateFirstBootConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, a.passwordInput.Init()
 		}
 
-		// Save master password
 		if err := a.storage.SetMasterPassword(a.masterPassword); err != nil {
 			a.err = fmt.Sprintf("Failed to save master password: %v", err)
 			return a, nil
 		}
-
-		// Initialize storage
 		if err := a.storage.InitStorage(); err != nil {
 			a.err = fmt.Sprintf("Failed to initialize storage: %v", err)
 			return a, nil
 		}
 
-		// Save password to keyring for auto-login
-		if a.keyringAvailable {
-			keyring.SavePassword(a.masterPassword)
-			// Update boot ID
-			if bootID, err := autologin.GetBootID(); err == nil {
-				a.config.AutoLogin.BootID = bootID
-				config.Save(a.storage.GetConfigPath(), a.config)
-			}
-		}
-
-		// Load connections (empty on first boot)
-		a.connections = []*models.Connection{}
-		a.list = NewConnectionList(a.connections)
-		a.list.SetSize(a.width, a.height)
-		a.state = StateList
-		return a, nil
+		return a.afterAuthSuccess()
 	}
 
 	var cmd tea.Cmd
@@ -351,59 +417,9 @@ func (a *App) updateFirstBootConfirm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, cmd
 }
 
-// One-Password Mode Prompt State (first boot only, before any master
-// password exists): choose between 1Password mode (no master password,
-// plaintext storage, connections only hold a 1Password reference) and the
-// classic master-password/encrypted-storage flow.
-func (a *App) updateOnePasswordPrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "y":
-		a.state = StateOnePasswordInfo
-		return a, nil
-	case "n":
-		a.state = StateFirstBoot
-		a.passwordInput = NewPasswordInput("Create Master Password:", "Enter a strong password")
-		return a, a.passwordInput.Init()
-	case "ctrl+c", "esc":
-		a.state = StateQuitting
-		return a, tea.Quit
-	}
-	return a, nil
-}
-
-// One-Password Mode Info State (first boot only): setup instructions plus
-// the actual confirmation that enables 1Password mode.
-func (a *App) updateOnePasswordInfo(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "enter":
-		a.config.OnePasswordMode = true
-		a.storage.SetPlainTextMode(true)
-		if err := a.storage.InitStorage(); err != nil {
-			a.err = fmt.Sprintf("Failed to initialize storage: %v", err)
-			return a, nil
-		}
-		if err := config.Save(a.storage.GetConfigPath(), a.config); err != nil {
-			a.err = fmt.Sprintf("Failed to save config: %v", err)
-			return a, nil
-		}
-		a.connections = []*models.Connection{}
-		a.list = NewConnectionList(a.connections)
-		a.list.SetSize(a.width, a.height)
-		a.state = StateList
-		return a, nil
-	case "esc":
-		a.state = StateOnePasswordPrompt
-		return a, nil
-	case "ctrl+c":
-		a.state = StateQuitting
-		return a, tea.Quit
-	}
-	return a, nil
-}
-
 func (a *App) viewFirstBootConfirm() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("SSH Connection Manager - First Boot"))
+	b.WriteString(titleStyle.Render("Create Master Password"))
 	b.WriteString("\n\n")
 	b.WriteString(a.confirmPassword.View())
 	b.WriteString("\n\n")
@@ -415,12 +431,12 @@ func (a *App) viewFirstBootConfirm() string {
 	return b.String()
 }
 
-// Login State
+// Login State (enter an existing master password) - reached only via
+// beginMasterPasswordPrompt now, never at startup.
 func (a *App) updateLogin(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc":
-		a.state = StateQuitting
-		return a, tea.Quit
+		return a.cancelMasterPasswordPrompt()
 	case "enter":
 		password := a.passwordInput.Value()
 		valid, err := a.storage.VerifyMasterPassword(password)
@@ -436,30 +452,7 @@ func (a *App) updateLogin(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 		a.masterPassword = password
 		a.err = ""
-
-		// Save password to keyring for auto-login
-		if a.keyringAvailable {
-			keyring.SavePassword(a.masterPassword)
-			// Update boot ID
-			if bootID, err := autologin.GetBootID(); err == nil {
-				a.config.AutoLogin.BootID = bootID
-				config.Save(a.storage.GetConfigPath(), a.config)
-			}
-		}
-
-		// Load connections
-		connections, err := a.storage.ListConnections(a.masterPassword)
-		if err != nil {
-			a.err = fmt.Sprintf("Failed to load connections: %v", err)
-			return a, nil
-		}
-
-		a.connections = connections
-		a.list = NewConnectionList(a.connections)
-		a.list.SetSize(a.width, a.height)
-
-		a.state = StateList
-		return a, nil
+		return a.afterAuthSuccess()
 	}
 
 	var cmd tea.Cmd
@@ -469,7 +462,9 @@ func (a *App) updateLogin(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (a *App) viewLogin() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("SSH Connection Manager"))
+	b.WriteString(titleStyle.Render("Master Password Required"))
+	b.WriteString("\n\n")
+	b.WriteString(subtitleStyle.Render("Needed to read or write this connection's saved password/key."))
 	b.WriteString("\n\n")
 	b.WriteString(a.passwordInput.View())
 	b.WriteString("\n\n")
@@ -477,7 +472,7 @@ func (a *App) viewLogin() string {
 		b.WriteString(errorStyle.Render(a.err))
 		b.WriteString("\n\n")
 	}
-	b.WriteString(helpStyle.Render("enter: login • esc: quit"))
+	b.WriteString(helpStyle.Render("enter: unlock • esc: cancel"))
 	return b.String()
 }
 
@@ -488,23 +483,30 @@ func (a *App) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.state = StateQuitting
 		return a, tea.Quit
 	case "s":
-		// Settings only covers master-password auto-login, which doesn't
-		// exist in 1Password mode.
-		if a.config.OnePasswordMode {
-			return a, nil
-		}
 		a.settings = NewSettings(a.config)
 		a.state = StateSettings
 		return a, nil
 	case "a":
 		a.state = StateAdd
-		a.form = NewConnectionForm(nil, a.config.OnePasswordMode)
+		a.form = NewConnectionForm(nil)
 		return a, a.form.Init()
 	case "e":
 		if !a.list.IsEmpty() {
 			selected := a.list.SelectedConnection()
+			if selected.Locked {
+				if a.masterPassword == "" && !a.tryCachedMasterPassword() {
+					a.pendingEditConn = selected
+					return a.beginMasterPasswordPrompt(pendingEdit, StateList)
+				}
+				full, err := a.storage.LoadConnection(selected.ID, a.masterPassword)
+				if err != nil {
+					a.err = fmt.Sprintf("Failed to decrypt connection: %v", err)
+					return a, nil
+				}
+				selected = full
+			}
 			a.state = StateEdit
-			a.form = NewConnectionForm(selected, a.config.OnePasswordMode)
+			a.form = NewConnectionForm(selected)
 			return a, a.form.Init()
 		}
 	case "d":
@@ -534,6 +536,7 @@ func (a *App) viewList() string {
 
 // Form State (Add/Edit)
 func (a *App) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	formState := a.state
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		a.state = StateList
@@ -544,12 +547,16 @@ func (a *App) updateForm(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
+		if conn.HasLocalSecret() && a.masterPassword == "" && !a.tryCachedMasterPassword() {
+			a.pendingFormConn = conn
+			return a.beginMasterPasswordPrompt(pendingSaveConnection, formState)
+		}
+
 		if err := a.storage.SaveConnection(conn, a.masterPassword); err != nil {
 			a.form.SetError(fmt.Sprintf("Failed to save: %v", err))
 			return a, nil
 		}
 
-		// Reload connections
 		a.reloadConnections()
 		a.state = StateList
 		return a, nil
@@ -695,12 +702,15 @@ func (a *App) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		option := a.settings.GetSelectedOption()
 		switch option {
 		case SettingsEnable:
-			// Enable auto-login - go to setup
+			// Enable auto-login - go to setup. Needs a master password
+			// first if one hasn't been created/entered yet this session.
+			if a.masterPassword == "" && !a.tryCachedMasterPassword() {
+				return a.beginMasterPasswordPrompt(pendingNone, StateSettings)
+			}
 			a.autoLoginSetup = NewAutoLoginSetup(a.config, a.masterPassword)
 			a.state = StateAutoLoginSetup
 			return a, nil
 		case SettingsReconfigure:
-			// Reconfigure auto-login
 			a.autoLoginSetup = NewAutoLoginSetup(a.config, a.masterPassword)
 			a.state = StateAutoLoginSetup
 			return a, nil
@@ -709,6 +719,9 @@ func (a *App) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			autologin.ClearAutoLogin(a.config)
 			config.Save(a.storage.GetConfigPath(), a.config)
 			a.settings = NewSettings(a.config) // Refresh settings view
+			return a, nil
+		case SettingsOnePasswordHelp:
+			a.state = StateOnePasswordHelp
 			return a, nil
 		case SettingsTheme:
 			a.themePicker = NewThemePicker(a.config.Theme)
@@ -727,6 +740,17 @@ func (a *App) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (a *App) viewSettings() string {
 	return a.settings.View()
+}
+
+// One-Password Help State - static setup instructions, purely
+// informational, no side effects.
+func (a *App) updateOnePasswordHelp(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "esc", "enter":
+		a.state = StateSettings
+		return a, nil
+	}
+	return a, nil
 }
 
 // Theme Picker State
@@ -755,31 +779,6 @@ func (a *App) viewThemePicker() string {
 	return a.themePicker.View()
 }
 
-// tryAutoLogin verifies password against the stored master key and, if
-// valid, loads connections and transitions to the list state. Returns
-// whether auto-login succeeded (i.e. the password matched).
-func (a *App) tryAutoLogin(password string) bool {
-	valid, err := a.storage.VerifyMasterPassword(password)
-	if err != nil || !valid {
-		return false
-	}
-
-	a.masterPassword = password
-
-	connections, err := a.storage.ListConnections(a.masterPassword)
-	if err != nil {
-		a.err = fmt.Sprintf("Failed to load connections: %v", err)
-		a.connections = []*models.Connection{}
-	} else {
-		a.connections = connections
-	}
-
-	a.list = NewConnectionList(a.connections)
-	a.list.SetSize(a.width, a.height)
-	a.state = StateList
-	return true
-}
-
 // Helper functions
 func (a *App) reloadConnections() {
 	connections, err := a.storage.ListConnections(a.masterPassword)
@@ -791,8 +790,25 @@ func (a *App) reloadConnections() {
 	a.list.UpdateConnections(a.connections)
 }
 
+// connectSSH stores conn as the pending SSH connection (established by
+// main, after the TUI exits) if it's ready to connect with as-is, or
+// detours through beginMasterPasswordPrompt first if it has a stored
+// secret this session doesn't have the master password for yet.
 func (a *App) connectSSH(conn *models.Connection) tea.Cmd {
-	// Store the connection to establish after TUI exits
+	if conn.Locked {
+		if a.masterPassword == "" && !a.tryCachedMasterPassword() {
+			a.pendingConnectConn = conn
+			_, cmd := a.beginMasterPasswordPrompt(pendingConnect, StateList)
+			return cmd
+		}
+		full, err := a.storage.LoadConnection(conn.ID, a.masterPassword)
+		if err != nil {
+			a.err = fmt.Sprintf("Failed to decrypt connection: %v", err)
+			return nil
+		}
+		conn = full
+	}
+
 	a.pendingConnection = conn
 	a.state = StateQuitting
 	return tea.Quit

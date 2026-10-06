@@ -50,7 +50,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
 		os.Exit(1)
 	}
-	store.SetPlainTextMode(cfg.OnePasswordMode)
 	ui.SetTheme(theme.Resolve(cfg.Theme))
 
 	// Main loop - restart TUI after SSH connection ends

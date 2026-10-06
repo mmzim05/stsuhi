@@ -16,6 +16,7 @@ const (
 	SettingsReconfigure
 	SettingsDisable
 	SettingsTheme
+	SettingsOnePasswordHelp
 	SettingsBack
 )
 
@@ -92,7 +93,7 @@ func (s *Settings) isOptionEnabled(opt SettingsOption) bool {
 		return !s.config.AutoLogin.Enabled
 	case SettingsReconfigure, SettingsDisable:
 		return s.config.AutoLogin.Enabled
-	case SettingsTheme, SettingsBack:
+	case SettingsTheme, SettingsOnePasswordHelp, SettingsBack:
 		return true
 	default:
 		return false
@@ -159,6 +160,7 @@ func (s Settings) View() string {
 		{SettingsReconfigure, "Reconfigure auto-login", s.config.AutoLogin.Enabled},
 		{SettingsDisable, "Disable auto-login", s.config.AutoLogin.Enabled},
 		{SettingsTheme, "Change theme", true},
+		{SettingsOnePasswordHelp, "1Password setup instructions", true},
 		{SettingsBack, "Back to connections", true},
 	}
 

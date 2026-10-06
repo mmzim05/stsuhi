@@ -24,23 +24,24 @@ const (
 	fieldCount
 )
 
-// ConnectionForm is a model for the add/edit connection form
+// ConnectionForm is a model for the add/edit connection form. Every field
+// is available on every connection - auth method is a per-connection
+// choice (password, key, SSH agent, 1Password reference, any combination),
+// not an app-wide mode.
 type ConnectionForm struct {
-	inputs          []textinput.Model
-	focusedField    int
-	err             string
-	isEdit          bool
-	originalConn    *models.Connection
-	useSSHAgent     bool
-	useOnePassword  bool
-	onePasswordMode bool
+	inputs         []textinput.Model
+	focusedField   int
+	err            string
+	isEdit         bool
+	originalConn   *models.Connection
+	useSSHAgent    bool
+	useOnePassword bool
 }
 
-// NewConnectionForm creates a new connection form. onePasswordMode restricts
-// the form to server name/address/port plus a 1Password item reference -
-// used app-wide when config.OnePasswordMode is on, since there is no master
-// password to encrypt a locally-stored username/password/key with.
-func NewConnectionForm(conn *models.Connection, onePasswordMode bool) ConnectionForm {
+// NewConnectionForm creates a new connection form. See the doc comment on
+// the conn != nil branch below for how a sealed connection's secret gets
+// into this form safely.
+func NewConnectionForm(conn *models.Connection) ConnectionForm {
 	inputs := make([]textinput.Model, fieldCount)
 
 	// Server Name
@@ -91,14 +92,16 @@ func NewConnectionForm(conn *models.Connection, onePasswordMode bool) Connection
 	inputs[fieldOnePasswordItem].CharLimit = 100
 
 	form := ConnectionForm{
-		inputs:          inputs,
-		focusedField:    0,
-		isEdit:          conn != nil,
-		onePasswordMode: onePasswordMode,
-		useOnePassword:  onePasswordMode,
+		inputs:       inputs,
+		focusedField: 0,
+		isEdit:       conn != nil,
 	}
 
-	// Populate fields if editing
+	// Populate fields if editing. app.go guarantees a sealed connection is
+	// already decrypted (via LoadConnection) before it ever reaches here -
+	// see App.updateList's "e" handler - so Password/PasskeyPath are real
+	// values, not placeholders, and safe to prefill (the Password input
+	// masks its echo either way).
 	if conn != nil {
 		form.originalConn = conn
 		inputs[fieldServerName].SetValue(conn.ServerName)
@@ -111,14 +114,27 @@ func NewConnectionForm(conn *models.Connection, onePasswordMode bool) Connection
 		inputs[fieldOnePasswordVault].SetValue(conn.OnePasswordVault)
 		inputs[fieldOnePasswordItem].SetValue(conn.OnePasswordItem)
 		form.useSSHAgent = conn.UseSSHAgent
-		if !onePasswordMode {
-			form.useOnePassword = conn.UseOnePassword
-		}
+		form.useOnePassword = conn.UseOnePassword
 	} else {
 		inputs[fieldPort].SetValue("22")
 	}
 
+	form.updateOnePasswordPlaceholders()
+
 	return form
+}
+
+// updateOnePasswordPlaceholders reflects whether User/Address can be
+// resolved from 1Password instead of typed locally - see
+// ssh.resolveOnePasswordCredential.
+func (f *ConnectionForm) updateOnePasswordPlaceholders() {
+	if f.useOnePassword {
+		f.inputs[fieldUser].Placeholder = "optional - from 1Password if blank"
+		f.inputs[fieldAddress].Placeholder = "optional - from 1Password if blank"
+		return
+	}
+	f.inputs[fieldUser].Placeholder = "root"
+	f.inputs[fieldAddress].Placeholder = "192.168.1.1 or example.com"
 }
 
 // Init initializes the form
@@ -146,6 +162,7 @@ func (f ConnectionForm) Update(msg tea.Msg) (ConnectionForm, tea.Cmd) {
 				return f, nil
 			case fieldUseOnePassword:
 				f.useOnePassword = !f.useOnePassword
+				f.updateOnePasswordPlaceholders()
 				return f, nil
 			}
 		}
@@ -172,62 +189,46 @@ func (f ConnectionForm) View() string {
 	}
 	b.WriteString("\n\n")
 
-	if f.onePasswordMode {
-		b.WriteString(mutedTextStyle.Render("1Password mode: username/password come from 1Password, not stored here."))
-		b.WriteString("\n\n")
+	labels := []string{
+		"Server Name:",
+		"User:",
+		"Address:",
+		"Port:",
+		"Password:",
+		"Passkey Path:",
+	}
 
-		f.renderField(&b, fieldServerName, "Server Name:")
+	for i, label := range labels {
+		if i == f.focusedField {
+			b.WriteString(labelStyle.Render("→ " + label))
+		} else {
+			b.WriteString(subtitleStyle.Render("  " + label))
+		}
+		b.WriteString("\n")
+		b.WriteString(f.inputs[i].View())
 		b.WriteString("\n\n")
-		f.renderField(&b, fieldAddress, "Address:")
+	}
+
+	f.renderToggle(&b, fieldUseSSHAgent, "Use SSH agent (1Password)", f.useSSHAgent)
+	b.WriteString("\n\n")
+
+	if f.useSSHAgent {
+		f.renderField(&b, fieldSSHAgentSocket, "Agent Socket:")
 		b.WriteString("\n\n")
-		f.renderField(&b, fieldPort, "Port:")
-		b.WriteString("\n\n")
+	}
+
+	f.renderToggle(&b, fieldUseOnePassword, "Fetch username/password from 1Password", f.useOnePassword)
+	b.WriteString("\n\n")
+
+	if f.useOnePassword {
 		f.renderField(&b, fieldOnePasswordVault, "1Password Vault:")
 		b.WriteString("\n\n")
 		f.renderField(&b, fieldOnePasswordItem, "1Password Item:")
 		b.WriteString("\n")
-		b.WriteString(mutedTextStyle.Render("    Looks up \"username\" and \"password\" fields on that item at connect time."))
+		b.WriteString(mutedTextStyle.Render("    Looks up \"username\" and \"password\" fields on that item at connect time -"))
+		b.WriteString("\n")
+		b.WriteString(mutedTextStyle.Render("    also a \"url\" field (\"address:port\") if present, so you can leave those blank too."))
 		b.WriteString("\n\n")
-	} else {
-		labels := []string{
-			"Server Name:",
-			"User:",
-			"Address:",
-			"Port:",
-			"Password:",
-			"Passkey Path:",
-		}
-
-		for i, label := range labels {
-			if i == f.focusedField {
-				b.WriteString(labelStyle.Render("→ " + label))
-			} else {
-				b.WriteString(subtitleStyle.Render("  " + label))
-			}
-			b.WriteString("\n")
-			b.WriteString(f.inputs[i].View())
-			b.WriteString("\n\n")
-		}
-
-		f.renderToggle(&b, fieldUseSSHAgent, "Use SSH agent (1Password)", f.useSSHAgent)
-		b.WriteString("\n\n")
-
-		if f.useSSHAgent {
-			f.renderField(&b, fieldSSHAgentSocket, "Agent Socket:")
-			b.WriteString("\n\n")
-		}
-
-		f.renderToggle(&b, fieldUseOnePassword, "Fetch username/password from 1Password", f.useOnePassword)
-		b.WriteString("\n\n")
-
-		if f.useOnePassword {
-			f.renderField(&b, fieldOnePasswordVault, "1Password Vault:")
-			b.WriteString("\n\n")
-			f.renderField(&b, fieldOnePasswordItem, "1Password Item:")
-			b.WriteString("\n")
-			b.WriteString(mutedTextStyle.Render("    Looks up \"username\" and \"password\" fields on that item at connect time."))
-			b.WriteString("\n\n")
-		}
 	}
 
 	if f.err != "" {
@@ -249,14 +250,6 @@ func isToggleField(field int) bool {
 // fieldActive reports whether a field is currently navigable: toggle fields
 // always are, but the fields they gate are only reachable while enabled.
 func (f *ConnectionForm) fieldActive(field int) bool {
-	if f.onePasswordMode {
-		switch field {
-		case fieldServerName, fieldAddress, fieldPort, fieldOnePasswordVault, fieldOnePasswordItem:
-			return true
-		default:
-			return false
-		}
-	}
 	switch field {
 	case fieldSSHAgentSocket:
 		return f.useSSHAgent
@@ -333,7 +326,11 @@ func (f *ConnectionForm) renderField(b *strings.Builder, field int, label string
 	b.WriteString(f.inputs[field].View())
 }
 
-// ToConnection converts form values to a Connection model
+// ToConnection converts form values to a Connection model. Leaving both
+// Password and PasskeyPath blank means this connection has no local
+// secret at all (1Password/SSH-agent-only) - see
+// storage.FileStorage.SaveConnection, which seals every field together
+// whenever either is set, and leaves everything in the clear when not.
 func (f *ConnectionForm) ToConnection() (*models.Connection, error) {
 	var conn *models.Connection
 
@@ -344,25 +341,15 @@ func (f *ConnectionForm) ToConnection() (*models.Connection, error) {
 	}
 
 	conn.ServerName = strings.TrimSpace(f.inputs[fieldServerName].Value())
+	conn.User = strings.TrimSpace(f.inputs[fieldUser].Value())
 	conn.Address = strings.TrimSpace(f.inputs[fieldAddress].Value())
+	conn.Password = f.inputs[fieldPassword].Value()
+	conn.PasskeyPath = strings.TrimSpace(f.inputs[fieldPasskeyPath].Value())
+	conn.UseSSHAgent = f.useSSHAgent
+	conn.SSHAgentSocket = strings.TrimSpace(f.inputs[fieldSSHAgentSocket].Value())
+	conn.UseOnePassword = f.useOnePassword
 	conn.OnePasswordVault = strings.TrimSpace(f.inputs[fieldOnePasswordVault].Value())
 	conn.OnePasswordItem = strings.TrimSpace(f.inputs[fieldOnePasswordItem].Value())
-
-	if f.onePasswordMode {
-		conn.User = ""
-		conn.Password = ""
-		conn.PasskeyPath = ""
-		conn.UseSSHAgent = false
-		conn.SSHAgentSocket = ""
-		conn.UseOnePassword = true
-	} else {
-		conn.User = strings.TrimSpace(f.inputs[fieldUser].Value())
-		conn.Password = f.inputs[fieldPassword].Value()
-		conn.PasskeyPath = strings.TrimSpace(f.inputs[fieldPasskeyPath].Value())
-		conn.UseSSHAgent = f.useSSHAgent
-		conn.SSHAgentSocket = strings.TrimSpace(f.inputs[fieldSSHAgentSocket].Value())
-		conn.UseOnePassword = f.useOnePassword
-	}
 
 	portStr := strings.TrimSpace(f.inputs[fieldPort].Value())
 	if portStr == "" {
