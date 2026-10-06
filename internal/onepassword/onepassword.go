@@ -59,7 +59,7 @@ func GetPassword(itemName string) (string, error) {
 		if ctx.Err() == context.DeadlineExceeded {
 			return "", fmt.Errorf("1password lookup timed out - is the desktop app unlocked?")
 		}
-		return "", fmt.Errorf("failed to read from 1password: %w", err)
+		return "", fmt.Errorf("failed to read from 1password: %s", opErrorDetail(err))
 	}
 
 	return strings.TrimSpace(string(output)), nil
@@ -86,13 +86,24 @@ type Credential struct {
 // an item that already has one filled in works without adding anything.
 var addressPortLabels = map[string]bool{"url": true, "endpoint": true, "website": true}
 
-// GetCredential looks up the named 1Password item's "username", "password",
-// and optional host/port ("address:port", under a "url"/"endpoint"/
-// "website" field label) fields, so a connection's SSH login (and,
-// optionally, its host/port) can be sourced directly from a 1Password
-// vault item instead of stored locally. If vault is empty, `op` searches
-// all vaults the signed-in account can see. Same non-blocking timeout/
-// no-stdin guard as GetPassword.
+// GetCredential looks up the named 1Password item's "username" and
+// "password" fields, plus an optional host/port, so a connection's SSH
+// login (and, optionally, its host/port) can be sourced directly from a
+// 1Password vault item instead of stored locally. If vault is empty, `op`
+// searches all vaults the signed-in account can see. Same non-blocking
+// timeout/no-stdin guard as GetPassword.
+//
+// Deliberately does not use `op item get --fields a,b,c`: that flag is
+// all-or-nothing on this op version - if even one requested field doesn't
+// exist on the item, the whole command fails, taking username/password
+// down with it. Fetching the full item instead means an item that simply
+// doesn't have a host/port set still works fine for username/password.
+//
+// The host/port can come from either a custom text field labeled "url"/
+// "endpoint"/"website" (addressPortLabels, checked in fields[]), or from
+// 1Password's own built-in URL entry on Login items (stored separately,
+// under urls[], not fields[] - this is what "website" on a Login item
+// actually is under the hood).
 func GetCredential(itemName, vault string) (Credential, error) {
 	if err := ValidateItemName(itemName); err != nil {
 		return Credential{}, err
@@ -105,7 +116,7 @@ func GetCredential(itemName, vault string) (Credential, error) {
 	if strings.TrimSpace(vault) != "" {
 		args = append(args, "--vault", vault)
 	}
-	args = append(args, "--fields", "label=username,label=password,label=url,label=endpoint,label=website", "--reveal", "--format", "json")
+	args = append(args, "--reveal", "--format", "json")
 
 	cmd := exec.CommandContext(ctx, binaryName, args...)
 	cmd.Stdin = nil
@@ -115,19 +126,26 @@ func GetCredential(itemName, vault string) (Credential, error) {
 		if ctx.Err() == context.DeadlineExceeded {
 			return Credential{}, fmt.Errorf("1password lookup timed out - is the desktop app unlocked?")
 		}
-		return Credential{}, fmt.Errorf("failed to read from 1password: %w", err)
+		return Credential{}, fmt.Errorf("failed to read from 1password: %s", opErrorDetail(err))
 	}
 
-	var fields []struct {
-		Label string `json:"label"`
-		Value string `json:"value"`
+	var item struct {
+		Fields []struct {
+			Label string `json:"label"`
+			Value string `json:"value"`
+		} `json:"fields"`
+		URLs []struct {
+			Label   string `json:"label"`
+			Href    string `json:"href"`
+			Primary bool   `json:"primary"`
+		} `json:"urls"`
 	}
-	if err := json.Unmarshal(output, &fields); err != nil {
+	if err := json.Unmarshal(output, &item); err != nil {
 		return Credential{}, fmt.Errorf("unexpected response from 1password: %w", err)
 	}
 
 	var cred Credential
-	for _, f := range fields {
+	for _, f := range item.Fields {
 		switch {
 		case f.Label == "username":
 			cred.Username = f.Value
@@ -138,11 +156,39 @@ func GetCredential(itemName, vault string) (Credential, error) {
 		}
 	}
 
+	if cred.Address == "" {
+		// Prefer the primary URL if there's more than one.
+		for _, u := range item.URLs {
+			if !addressPortLabels[u.Label] {
+				continue
+			}
+			cred.Address, cred.Port = parseAddressPort(u.Href)
+			if u.Primary {
+				break
+			}
+		}
+	}
+
 	if cred.Password == "" {
 		return Credential{}, fmt.Errorf("1password item %q has no password field", itemName)
 	}
 
 	return cred, nil
+}
+
+// opErrorDetail extracts op's own stderr message from a failed command, so
+// callers see e.g. "[ERROR] ... isn't signed in" instead of the useless
+// "exit status 1" that err.Error() alone gives for an *exec.ExitError.
+// cmd.Output() already captures stderr into ExitError.Stderr; this just
+// surfaces it.
+func opErrorDetail(err error) string {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if msg := strings.TrimSpace(string(exitErr.Stderr)); msg != "" {
+			return msg
+		}
+	}
+	return err.Error()
 }
 
 // parseAddressPort splits a "url" field value formatted as "address:port"
