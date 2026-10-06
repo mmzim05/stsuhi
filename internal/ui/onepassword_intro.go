@@ -30,12 +30,15 @@ const onePasswordSetupInstructions = `1) Install the 1Password desktop app and C
    1Password" on a connection, and looks the credentials up at connect
    time. Nothing is ever written back to 1Password.
 
-6) Optional: add a custom text field labeled "url", formatted as
-   "address:port" (port optional, e.g. "10.0.0.5:2222" or just
-   "10.0.0.5"). If present, stsuhi uses it instead of whatever's typed
-   locally - leave the connection's Address field blank and nothing about
-   that server (host, port, or credentials) is ever stored on this
-   machine, only the item/vault reference needed to look it up.`
+6) Optional: fill in a "url", "endpoint", or "website" field (stsuhi
+   checks all three - "website" is 1Password's own built-in URL field on
+   Login items, so one you've already filled in just works), formatted
+   as "address:port" (port optional, e.g. "10.0.0.5:2222" or just
+   "10.0.0.5" - no port means stsuhi falls back to 22). If present,
+   stsuhi uses it instead of whatever's typed locally - leave the
+   connection's Address field blank and nothing about that server (host,
+   port, or credentials) is ever stored on this machine, only the
+   item/vault reference needed to look it up.`
 
 func viewOnePasswordInfoBody() string {
 	var b strings.Builder

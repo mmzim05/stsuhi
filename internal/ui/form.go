@@ -227,7 +227,9 @@ func (f ConnectionForm) View() string {
 		b.WriteString("\n")
 		b.WriteString(mutedTextStyle.Render("    Looks up \"username\" and \"password\" fields on that item at connect time -"))
 		b.WriteString("\n")
-		b.WriteString(mutedTextStyle.Render("    also a \"url\" field (\"address:port\") if present, so you can leave those blank too."))
+		b.WriteString(mutedTextStyle.Render("    also a \"url\"/\"endpoint\"/\"website\" field (\"address:port\") if present,"))
+		b.WriteString("\n")
+		b.WriteString(mutedTextStyle.Render("    so you can leave those blank too."))
 		b.WriteString("\n\n")
 	}
 
