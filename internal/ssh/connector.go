@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 	"unsafe"
 
@@ -96,6 +95,15 @@ func connectWithPTY(conn *models.Connection) error {
 	}
 	defer ptmx.Close()
 
+	cols, rows := 80, 24
+	if size, err := pty.GetsizeFull(os.Stdin); err == nil {
+		cols, rows = int(size.Cols), int(size.Rows)
+	}
+	watcher := newPromptWatcher(conn.User, cols, rows, func() {
+		ptmx.Write([]byte(conn.Password + "\n"))
+	})
+	defer watcher.Stop()
+
 	// Handle terminal size changes
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGWINCH)
@@ -103,6 +111,9 @@ func connectWithPTY(conn *models.Connection) error {
 		for range ch {
 			if err := pty.InheritSize(os.Stdin, ptmx); err != nil {
 				return
+			}
+			if size, err := pty.GetsizeFull(os.Stdin); err == nil {
+				watcher.Resize(int(size.Cols), int(size.Rows))
 			}
 		}
 	}()
@@ -115,18 +126,12 @@ func connectWithPTY(conn *models.Connection) error {
 	}
 	defer restoreMode(os.Stdin.Fd(), oldState)
 
-	// Track whether we've seen any password prompts
-	sshPasswordSent := false
-
-	// Create a buffer to capture output for password detection
-	var outputBuffer strings.Builder
-
 	// Copy input from user to PTY
 	go func() {
 		io.Copy(ptmx, os.Stdin)
 	}()
 
-	// Read from PTY and write to stdout, detecting password prompts
+	// Read from PTY and write to stdout, watching for password prompts
 	go func() {
 		buf := make([]byte, 1024)
 		for {
@@ -134,46 +139,8 @@ func connectWithPTY(conn *models.Connection) error {
 			if err != nil {
 				return
 			}
-
-			// Write to stdout
 			os.Stdout.Write(buf[:n])
-
-			// Add to buffer for password prompt detection
-			outputBuffer.Write(buf[:n])
-
-			// Keep only last 500 characters to detect prompts
-			if outputBuffer.Len() > 500 {
-				s := outputBuffer.String()
-				outputBuffer.Reset()
-				outputBuffer.WriteString(s[len(s)-500:])
-			}
-
-			output := strings.ToLower(outputBuffer.String())
-
-			// Detect SSH password prompt (only send once)
-			if !sshPasswordSent && conn.Password != "" {
-				if strings.Contains(output, "password:") || strings.Contains(output, "'s password:") {
-					ptmx.Write([]byte(conn.Password + "\n"))
-					sshPasswordSent = true
-					outputBuffer.Reset()
-					continue
-				}
-			}
-
-			// Detect sudo password prompt - use same password as SSH login
-			// Only auto-fill if the prompt is for the SSH user (not docker containers, etc.)
-			if conn.Password != "" && sshPasswordSent {
-				sshUser := strings.ToLower(conn.User)
-				// Check for sudo password prompts that match the SSH user
-				// Format: "[sudo] password for username:"
-				if strings.Contains(output, "[sudo]") &&
-					strings.Contains(output, "password") &&
-					strings.Contains(output, sshUser) {
-					ptmx.Write([]byte(conn.Password + "\n"))
-					outputBuffer.Reset()
-					continue
-				}
-			}
+			watcher.Write(buf[:n])
 		}
 	}()
 
