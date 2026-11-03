@@ -1,2 +1,7 @@
-stsuhi
-dist/
+# Build outputs: never commit generated files. Releases are built by CI.
+/stsuhi
+/ssh-manager
+/dist/
+*.desktop
+*.test
+*.out
