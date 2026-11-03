@@ -9,7 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
-	"stsuhi/internal/models"
+	"github.com/mmzim05/stsuhi/internal/models"
 )
 
 // connectionItem wraps a Connection for use in the list

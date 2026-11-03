@@ -7,8 +7,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
-	"stsuhi/internal/config"
-	"stsuhi/internal/onepassword"
+	"github.com/mmzim05/stsuhi/internal/config"
+	"github.com/mmzim05/stsuhi/internal/onepassword"
 )
 
 // Row indices within the setup screen. Row 1 (item name) is only navigable

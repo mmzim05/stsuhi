@@ -9,17 +9,27 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/crypto/pbkdf2"
 )
 
 const (
-	KeySize        = 32 // AES-256
-	SaltSize       = 32
-	NonceSize      = 12 // GCM standard nonce size
-	PBKDF2Iter     = 100000
-	BcryptCost     = 12
+	KeySize    = 32 // AES-256
+	SaltSize   = 32
+	NonceSize  = 12 // GCM standard nonce size
+	BcryptCost = 12
+
+	// PBKDF2Iter is the PBKDF2-SHA256 cost for new ciphertexts (OWASP 2023).
+	PBKDF2Iter = 600000
+	// LegacyPBKDF2Iter is the cost used before versioned ciphertexts.
+	// Unprefixed ciphertexts were written with it and still decrypt.
+	LegacyPBKDF2Iter = 100000
+
+	// versionPrefix marks a ciphertext derived with PBKDF2Iter. The base64
+	// alphabet has no ':', so it can never collide with a legacy value.
+	versionPrefix = "v2:"
 )
 
 var (
@@ -28,12 +38,19 @@ var (
 )
 
 // DeriveKey derives an encryption key from a password and salt using PBKDF2
-func DeriveKey(password string, salt []byte) []byte {
-	return pbkdf2.Key([]byte(password), salt, PBKDF2Iter, KeySize, sha256.New)
+// with the given iteration count
+func DeriveKey(password string, salt []byte, iterations int) []byte {
+	return pbkdf2.Key([]byte(password), salt, iterations, KeySize, sha256.New)
+}
+
+// IsLegacy reports whether encoded was written with LegacyPBKDF2Iter and
+// should be re-encrypted with Encrypt once the password is known
+func IsLegacy(encoded string) bool {
+	return !strings.HasPrefix(encoded, versionPrefix)
 }
 
 // Encrypt encrypts plaintext data using AES-256-GCM with the given password
-// Returns base64-encoded string in format: salt + nonce + ciphertext + tag
+// Returns versionPrefix + base64(salt + nonce + ciphertext + tag)
 func Encrypt(data []byte, password string) (string, error) {
 	// Generate random salt
 	salt := make([]byte, SaltSize)
@@ -42,7 +59,7 @@ func Encrypt(data []byte, password string) (string, error) {
 	}
 
 	// Derive encryption key
-	key := DeriveKey(password, salt)
+	key := DeriveKey(password, salt, PBKDF2Iter)
 
 	// Create AES cipher
 	block, err := aes.NewCipher(key)
@@ -71,11 +88,18 @@ func Encrypt(data []byte, password string) (string, error) {
 	copy(result[SaltSize:], nonce)
 	copy(result[SaltSize+len(nonce):], ciphertext)
 
-	return base64.StdEncoding.EncodeToString(result), nil
+	return versionPrefix + base64.StdEncoding.EncodeToString(result), nil
 }
 
-// Decrypt decrypts base64-encoded ciphertext using the given password
+// Decrypt decrypts a ciphertext from Encrypt using the given password.
+// Legacy unprefixed ciphertexts are decrypted with LegacyPBKDF2Iter.
 func Decrypt(encoded string, password string) ([]byte, error) {
+	iterations := LegacyPBKDF2Iter
+	if body, ok := strings.CutPrefix(encoded, versionPrefix); ok {
+		iterations = PBKDF2Iter
+		encoded = body
+	}
+
 	// Decode base64
 	data, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
@@ -93,7 +117,7 @@ func Decrypt(encoded string, password string) ([]byte, error) {
 	ciphertext := data[SaltSize+NonceSize:]
 
 	// Derive encryption key
-	key := DeriveKey(password, salt)
+	key := DeriveKey(password, salt, iterations)
 
 	// Create AES cipher
 	block, err := aes.NewCipher(key)

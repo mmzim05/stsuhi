@@ -1,6 +1,6 @@
 package storage
 
-import "stsuhi/internal/models"
+import "github.com/mmzim05/stsuhi/internal/models"
 
 // Storage defines the interface for connection persistence
 type Storage interface {

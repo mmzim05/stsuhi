@@ -5,13 +5,13 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"stsuhi/internal/autologin"
-	"stsuhi/internal/config"
-	"stsuhi/internal/keyring"
-	"stsuhi/internal/models"
-	"stsuhi/internal/onepassword"
-	"stsuhi/internal/storage"
-	"stsuhi/internal/theme"
+	"github.com/mmzim05/stsuhi/internal/autologin"
+	"github.com/mmzim05/stsuhi/internal/config"
+	"github.com/mmzim05/stsuhi/internal/keyring"
+	"github.com/mmzim05/stsuhi/internal/models"
+	"github.com/mmzim05/stsuhi/internal/onepassword"
+	"github.com/mmzim05/stsuhi/internal/storage"
+	"github.com/mmzim05/stsuhi/internal/theme"
 )
 
 // AppState represents the current state of the application
@@ -122,53 +122,64 @@ func (a *App) Init() tea.Cmd {
 	return nil
 }
 
-// tryCachedMasterPassword attempts to silently recover a previously-saved
-// master password from the configured auto-login backend (OS keyring or
-// 1Password), the same way login used to happen automatically at startup.
-// Never prompts; just leaves a.masterPassword empty on failure. Returns
-// whether a.masterPassword is now set.
+// tryCachedMasterPassword attempts to silently recover the master password
+// from the auto-login backend (OS keyring or 1Password). It does nothing
+// unless auto-login is enabled, and it honors the security rules: once a
+// rule fires (reboot, lock, idle), the cached copy is dropped and the next
+// manual login re-caches it. Never prompts; returns whether
+// a.masterPassword is now set.
 func (a *App) tryCachedMasterPassword() bool {
 	if a.masterPassword != "" {
 		return true
 	}
-
-	switch a.config.AutoLogin.EffectiveBackend() {
-	case config.BackendOnePassword:
-		if onepassword.IsAvailable() {
-			if password, err := onepassword.GetPassword(a.config.AutoLogin.OnePasswordItemName); err == nil {
-				if valid, _ := a.storage.VerifyMasterPassword(password); valid {
-					a.masterPassword = password
-					return true
-				}
-			}
-		}
-
-	default: // keyring
-		if a.keyringAvailable {
-			// Check if boot ID has changed (reboot detection)
-			currentBootID, err := autologin.GetBootID()
-			if err == nil {
-				if a.config.AutoLogin.BootID != "" && a.config.AutoLogin.BootID != currentBootID {
-					keyring.DeletePassword()
-					a.config.AutoLogin.BootID = currentBootID
-					config.Save(a.storage.GetConfigPath(), a.config)
-				}
-			}
-
-			if password, err := keyring.GetPassword(); err == nil {
-				if valid, _ := a.storage.VerifyMasterPassword(password); valid {
-					a.masterPassword = password
-					if currentBootID != "" {
-						a.config.AutoLogin.BootID = currentBootID
-						config.Save(a.storage.GetConfigPath(), a.config)
-					}
-					return true
-				}
-			}
-		}
+	if !a.config.AutoLogin.Enabled {
+		return false
 	}
 
-	return false
+	backend := a.config.AutoLogin.EffectiveBackend()
+	if expired, _ := autologin.ShouldClearAutoLogin(a.config); expired {
+		if backend == config.BackendKeyring && a.keyringAvailable {
+			if err := keyring.DeletePassword(); err != nil {
+				a.err = fmt.Sprintf("Failed to clear auto-login: %v", err)
+			}
+		}
+		return false
+	}
+
+	var password string
+	var err error
+	switch backend {
+	case config.BackendOnePassword:
+		if !onepassword.IsAvailable() {
+			return false
+		}
+		password, err = onepassword.GetPassword(a.config.AutoLogin.OnePasswordItemName)
+	default:
+		if !a.keyringAvailable {
+			return false
+		}
+		password, err = keyring.GetPassword()
+	}
+	if err != nil {
+		return false
+	}
+
+	valid, err := a.storage.VerifyMasterPassword(password)
+	if err != nil || !valid {
+		return false
+	}
+	a.masterPassword = password
+	a.saveLoginMetadata()
+	return true
+}
+
+// saveLoginMetadata records boot ID, session ID and time of this login, so
+// the auto-login security rules can tell when to forget the password
+func (a *App) saveLoginMetadata() {
+	autologin.UpdateLoginMetadata(a.config)
+	if err := config.Save(a.storage.GetConfigPath(), a.config); err != nil {
+		a.err = fmt.Sprintf("Failed to save config: %v", err)
+	}
 }
 
 // beginMasterPasswordPrompt transitions to the password-entry/creation
@@ -213,12 +224,13 @@ func (a *App) cancelMasterPasswordPrompt() (tea.Model, tea.Cmd) {
 // verified: it caches the password for auto-login the same way a
 // successful login always has, then carries out whatever was pending.
 func (a *App) afterAuthSuccess() (tea.Model, tea.Cmd) {
-	if a.keyringAvailable {
-		keyring.SavePassword(a.masterPassword)
-		if bootID, err := autologin.GetBootID(); err == nil {
-			a.config.AutoLogin.BootID = bootID
-			config.Save(a.storage.GetConfigPath(), a.config)
+	if a.config.AutoLogin.Enabled {
+		if a.config.AutoLogin.EffectiveBackend() == config.BackendKeyring && a.keyringAvailable {
+			if err := keyring.SavePassword(a.masterPassword); err != nil {
+				a.err = fmt.Sprintf("Failed to cache password for auto-login: %v", err)
+			}
 		}
+		a.saveLoginMetadata()
 	}
 
 	switch a.pendingAction {
@@ -716,8 +728,12 @@ func (a *App) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, nil
 		case SettingsDisable:
 			// Disable auto-login
-			autologin.ClearAutoLogin(a.config)
-			config.Save(a.storage.GetConfigPath(), a.config)
+			if err := autologin.ClearAutoLogin(a.config); err != nil {
+				a.err = err.Error()
+			}
+			if err := config.Save(a.storage.GetConfigPath(), a.config); err != nil {
+				a.err = fmt.Sprintf("Failed to save config: %v", err)
+			}
 			a.settings = NewSettings(a.config) // Refresh settings view
 			return a, nil
 		case SettingsOnePasswordHelp:

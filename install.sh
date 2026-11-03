@@ -1,110 +1,133 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-set -e
+readonly REPO="mmzim05/stsuhi"
+readonly INSTALL_DIR="${HOME}/.local/bin"
+readonly DESKTOP_DIR="${HOME}/.local/share/applications"
+readonly BIN_PATH="${INSTALL_DIR}/stsuhi"
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DESKTOP_FILE="$SCRIPT_DIR/stsuhi.desktop"
-INSTALL_DIR="$HOME/.local/bin"
-DESKTOP_DIR="$HOME/.local/share/applications"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR="$script_dir"
 
-echo "Installing Stsuhi SSH Manager..."
+die() {
+  echo "Error: $*" >&2
+  exit 1
+}
 
-# Go toolchain required to build - not something this script installs itself,
-# since doing so would mean picking a package manager / version on the
-# user's behalf.
-if ! command -v go &> /dev/null; then
-    echo "Error: Go toolchain not found."
-    echo "Install it first, e.g.: sudo pacman -S go"
-    exit 1
-fi
+# Prints the release asset suffix for this machine, e.g. "linux-amd64".
+detect_platform() {
+  local os
+  local arch
+  os="$(uname -s)"
+  arch="$(uname -m)"
+  if [[ "$os" != "Linux" ]]; then
+    die "stsuhi only supports Linux (found ${os})."
+  fi
+  case "$arch" in
+    x86_64 | amd64) echo "linux-amd64" ;;
+    aarch64 | arm64) echo "linux-arm64" ;;
+    *) die "no prebuilt binary for ${arch}; install Go and re-run." ;;
+  esac
+}
 
-mkdir -p "$INSTALL_DIR"
-mkdir -p "$DESKTOP_DIR"
+build_from_source() {
+  echo "Building stsuhi from source with $(go version)..."
+  (cd "$SCRIPT_DIR" && go build -trimpath -ldflags "-s -w" \
+    -o "$BIN_PATH" .)
+}
 
-echo "Fetching Go module dependencies..."
-( cd "$SCRIPT_DIR" && go mod download )
+download_release() {
+  local platform
+  local url
+  local tmp_file
+  platform="$(detect_platform)"
+  url="https://github.com/${REPO}/releases/latest/download/stsuhi-${platform}"
+  if ! command -v curl &> /dev/null; then
+    die "need either Go (to build) or curl (to download)."
+  fi
+  echo "Go not found; downloading prebuilt binary for ${platform}..."
+  tmp_file="$(mktemp)"
+  if ! curl -fsSL -o "$tmp_file" "$url"; then
+    rm -f "$tmp_file"
+    die "download failed: ${url}"
+  fi
+  install -m 0755 "$tmp_file" "$BIN_PATH"
+  rm -f "$tmp_file"
+}
 
-echo "Building stsuhi..."
-( cd "$SCRIPT_DIR" && go build -o "$INSTALL_DIR/stsuhi" . )
-chmod +x "$INSTALL_DIR/stsuhi"
+install_binary() {
+  mkdir -p "$INSTALL_DIR"
+  if command -v go &> /dev/null && [[ -f "${SCRIPT_DIR}/go.mod" ]]; then
+    build_from_source
+  else
+    download_release
+  fi
+  chmod 0755 "$BIN_PATH"
+}
 
-# Install desktop entry, pointed at the real install path. Uses
-# xdg-terminal-exec with Omarchy's TUI.tile app-id convention (same as e.g.
-# Docker's and Disk Usage's desktop entries) so Hyprland's window rules
-# treat it like the other TUI apps, and so it shows up searchable by name
-# in Omarchy's app launcher.
-if [ ! -f "$DESKTOP_FILE" ]; then
-    echo "Error: Desktop file not found at $DESKTOP_FILE"
-    exit 1
-fi
+# Adds a launcher entry only on machines with a desktop session.
+install_desktop_entry() {
+  local exec_line
+  local terminal
+  if [[ -z "${XDG_CURRENT_DESKTOP:-}" && -z "${DISPLAY:-}" \
+    && -z "${WAYLAND_DISPLAY:-}" ]]; then
+    return
+  fi
+  # xdg-terminal-exec with the TUI.tile app-id makes Omarchy/Hyprland
+  # tile it like other TUI apps; elsewhere the launcher opens a terminal.
+  if command -v xdg-terminal-exec &> /dev/null; then
+    exec_line="xdg-terminal-exec --app-id=TUI.tile -e ${BIN_PATH}"
+    terminal="false"
+  else
+    exec_line="$BIN_PATH"
+    terminal="true"
+  fi
+  mkdir -p "$DESKTOP_DIR"
+  cat > "${DESKTOP_DIR}/stsuhi.desktop" << EOF
+[Desktop Entry]
+Version=1.0
+Name=stsuhi
+Comment=TUI SSH connection manager
+Exec=${exec_line}
+Terminal=${terminal}
+Type=Application
+Icon=utilities-terminal
+StartupNotify=true
+Categories=Network;RemoteAccess;
+Keywords=ssh;remote;terminal;connection;
+EOF
+  if command -v update-desktop-database &> /dev/null; then
+    update-desktop-database "$DESKTOP_DIR" || true
+  fi
+  echo "Desktop entry: ${DESKTOP_DIR}/stsuhi.desktop"
+}
 
-echo "Installing desktop entry..."
-sed "s|__STSUHI_BIN__|$INSTALL_DIR/stsuhi|" "$DESKTOP_FILE" > "$DESKTOP_DIR/stsuhi.desktop"
-chmod +x "$DESKTOP_DIR/stsuhi.desktop"
-
-# Update desktop database so the launcher picks up the new entry immediately
-if command -v update-desktop-database &> /dev/null; then
-    update-desktop-database "$DESKTOP_DIR"
-fi
-
-echo ""
-echo "✓ Installation complete!"
-echo ""
-echo "The application has been installed to: $INSTALL_DIR/stsuhi"
-echo "Desktop entry created at: $DESKTOP_DIR/stsuhi.desktop"
-echo ""
-echo "You can now:"
-echo "  - Search 'stsuhi' in your Omarchy app launcher"
-echo "  - Run 'stsuhi' from the terminal (if ~/.local/bin is in your PATH)"
-echo ""
-
-# Check if ~/.local/bin is in PATH
-if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
-    echo "Note: $HOME/.local/bin is not in your PATH."
-    echo "Add this line to your ~/.bashrc or ~/.zshrc:"
-    echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
-fi
-
-# --- 1Password integration (optional) ---
-# stsuhi works fully without this - local passwords/keys/SSH-agent
-# connections don't need it. This only matters if you want a connection
-# to fetch its username/password (and optionally address/port) from
-# 1Password instead of storing them locally.
-echo ""
-echo "1Password integration (optional)"
-if command -v op &> /dev/null; then
-    echo "  1Password CLI (op) is already installed."
-elif command -v pacman &> /dev/null; then
-    read -p "  Install 1Password + 1Password CLI now via pacman? [y/N] " -n 1 -r REPLY
+print_path_hint() {
+  if [[ ":${PATH}:" != *":${INSTALL_DIR}:"* ]]; then
     echo ""
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        sudo pacman -S --needed 1password 1password-cli
-    else
-        echo "  Skipped. Install later with: sudo pacman -S 1password 1password-cli"
-    fi
-else
-    echo "  'op' not found and no pacman to install it with - skipping."
-    echo "  Get it from https://1password.com/downloads/command-line/ if you want it."
-fi
+    echo "Note: ${INSTALL_DIR} is not in your PATH. Add this to your shell rc:"
+    echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+  fi
+}
 
-cat <<'GUIDE'
+print_onepassword_hint() {
+  if command -v op &> /dev/null; then
+    return
+  fi
+  echo ""
+  echo "Optional: install the 1Password CLI (op) to pull credentials from"
+  echo "1Password. See https://developer.1password.com/docs/cli/get-started/"
+}
 
-  Whether or not you just installed it, two manual steps are still
-  needed before stsuhi can actually reach 1Password:
+main() {
+  echo "Installing stsuhi..."
+  install_binary
+  echo "Installed: ${BIN_PATH}"
+  install_desktop_entry
+  print_path_hint
+  print_onepassword_hint
+  echo ""
+  echo "Done. Run 'stsuhi' to start."
+}
 
-    1. Add yourself to the "onepassword" group (lets the CLI/SSH-agent
-       socket under ~/.1password/ be read by your user), then re-login
-       or reboot for it to take effect:
-         sudo usermod -aG onepassword $USER
-
-    2. In the 1Password desktop app: Settings -> Developer, enable
-       "Integrate with 1Password CLI".
-
-  Verify with: op vault list
-  (if that fails with "account is not signed in" or hangs, re-check
-  step 2 - that's an op/1Password state issue, not stsuhi's)
-
-  Then, in stsuhi: Settings -> "1Password setup instructions" has the
-  full walkthrough, including how to format a connection's 1Password
-  item so its username/password (and optionally address/port) get used.
-GUIDE
+main "$@"

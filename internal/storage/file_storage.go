@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"stsuhi/internal/crypto"
-	"stsuhi/internal/models"
+	"github.com/mmzim05/stsuhi/internal/crypto"
+	"github.com/mmzim05/stsuhi/internal/models"
 )
 
 const (
@@ -156,10 +156,6 @@ type secretBundle struct {
 	SudoPassword string `json:"sudo_password,omitempty"`
 }
 
-func (b secretBundle) emptySecret() bool {
-	return b.Password == "" && b.PasskeyPath == "" && b.SudoPassword == ""
-}
-
 // SaveConnection seals ServerName/User/Address/Port together with
 // Password/PasskeyPath/SudoPassword under masterPassword whenever any of
 // the latter are set; otherwise every field is written in the clear.
@@ -186,28 +182,13 @@ func (fs *FileStorage) SaveConnection(conn *models.Connection, masterPassword st
 		OnePasswordItem:  conn.OnePasswordItem,
 	}
 
-	bundle := secretBundle{
-		Password:     conn.Password,
-		PasskeyPath:  conn.PasskeyPath,
-		SudoPassword: conn.SudoPassword,
-	}
-
-	if !bundle.emptySecret() {
+	if conn.HasLocalSecret() {
 		if masterPassword == "" {
 			return fmt.Errorf("saving a password/passkey/sudo password: %w", ErrMasterPasswordRequired)
 		}
-		bundle.ServerName = conn.ServerName
-		bundle.User = conn.User
-		bundle.Address = conn.Address
-		bundle.Port = conn.Port
-
-		jsonData, err := json.Marshal(bundle)
+		encrypted, err := sealSecret(conn, masterPassword)
 		if err != nil {
-			return fmt.Errorf("failed to marshal secret: %w", err)
-		}
-		encrypted, err := crypto.Encrypt(jsonData, masterPassword)
-		if err != nil {
-			return fmt.Errorf("failed to encrypt secret: %w", err)
+			return err
 		}
 		od.EncryptedSecret = encrypted
 		od.HasPasskey = conn.PasskeyPath != ""
@@ -218,14 +199,40 @@ func (fs *FileStorage) SaveConnection(conn *models.Connection, masterPassword st
 		od.Port = conn.Port
 	}
 
+	return fs.writeOnDisk(od)
+}
+
+// sealSecret encrypts conn's secret fields together with ServerName/User/
+// Address/Port, see secretBundle
+func sealSecret(conn *models.Connection, masterPassword string) (string, error) {
+	bundle := secretBundle{
+		ServerName:   conn.ServerName,
+		User:         conn.User,
+		Address:      conn.Address,
+		Port:         conn.Port,
+		Password:     conn.Password,
+		PasskeyPath:  conn.PasskeyPath,
+		SudoPassword: conn.SudoPassword,
+	}
+	jsonData, err := json.Marshal(bundle)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal secret: %w", err)
+	}
+	encrypted, err := crypto.Encrypt(jsonData, masterPassword)
+	if err != nil {
+		return "", fmt.Errorf("failed to encrypt secret: %w", err)
+	}
+	return encrypted, nil
+}
+
+func (fs *FileStorage) writeOnDisk(od onDiskConnection) error {
 	data, err := json.MarshalIndent(od, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal connection: %w", err)
 	}
-	if err := os.WriteFile(fs.connectionFilePath(conn.ID), data, 0600); err != nil {
+	if err := os.WriteFile(fs.connectionFilePath(od.ID), data, 0600); err != nil {
 		return fmt.Errorf("failed to write connection file: %w", err)
 	}
-
 	return nil
 }
 
@@ -238,7 +245,38 @@ func (fs *FileStorage) readOnDisk(id string) (onDiskConnection, error) {
 	if err := json.Unmarshal(data, &od); err != nil {
 		return od, err
 	}
+	// The file name is the ID. Trusting the ID inside the file would let
+	// an edited file make the next save write outside connectionsDir.
+	od.ID = id
 	return od, nil
+}
+
+// load reads and decodes one connection, see toModel. A legacy-encrypted
+// secret is re-sealed with the current KDF cost once it decrypts.
+func (fs *FileStorage) load(id string, masterPassword string) (*models.Connection, error) {
+	od, err := fs.readOnDisk(id)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := toModel(od, masterPassword)
+	if err != nil || !conn.HasStoredSecret || !crypto.IsLegacy(od.EncryptedSecret) {
+		return conn, err
+	}
+	if err := fs.upgradeSecret(od, conn, masterPassword); err != nil {
+		// Not fatal: the legacy secret still decrypts, and the upgrade is
+		// retried on the next load.
+		return conn, nil
+	}
+	return conn, nil
+}
+
+func (fs *FileStorage) upgradeSecret(od onDiskConnection, conn *models.Connection, masterPassword string) error {
+	encrypted, err := sealSecret(conn, masterPassword)
+	if err != nil {
+		return err
+	}
+	od.EncryptedSecret = encrypted
+	return fs.writeOnDisk(od)
 }
 
 // toModel builds the in-memory Connection for od. If od has a sealed
@@ -300,14 +338,14 @@ func toModel(od onDiskConnection, masterPassword string) (*models.Connection, er
 // LoadConnection loads a connection by ID, decrypting it if it's sealed
 // and masterPassword is supplied and correct. See toModel.
 func (fs *FileStorage) LoadConnection(id string, masterPassword string) (*models.Connection, error) {
-	od, err := fs.readOnDisk(id)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("connection not found: %s", id)
-		}
+	conn, err := fs.load(id, masterPassword)
+	if os.IsNotExist(err) {
+		return nil, fmt.Errorf("connection not found: %s", id)
+	}
+	if conn == nil && err != nil {
 		return nil, fmt.Errorf("failed to read connection file: %w", err)
 	}
-	return toModel(od, masterPassword)
+	return conn, err
 }
 
 // ListConnections loads every connection. Sealed connections are decrypted
@@ -331,12 +369,12 @@ func (fs *FileStorage) ListConnections(masterPassword string) ([]*models.Connect
 		}
 
 		id := entry.Name()[:len(entry.Name())-len(ConnectionFileExt)]
-		od, err := fs.readOnDisk(id)
-		if err != nil {
-			// Skip connections that fail to load
+		// An error with a non-nil conn means Locked, which listing shows.
+		// No conn means an unreadable file: skip it, keep the rest.
+		conn, err := fs.load(id, masterPassword)
+		if err != nil && conn == nil {
 			continue
 		}
-		conn, _ := toModel(od, masterPassword)
 		connections = append(connections, conn)
 	}
 

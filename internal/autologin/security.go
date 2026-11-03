@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"stsuhi/internal/config"
-	"stsuhi/internal/keyring"
+	"github.com/mmzim05/stsuhi/internal/config"
+	"github.com/mmzim05/stsuhi/internal/keyring"
 )
 
 // GetBootID returns a platform-specific boot identifier
@@ -139,7 +139,7 @@ func ShouldClearAutoLogin(cfg *config.Config) (bool, string) {
 }
 
 // UpdateLoginMetadata updates config with current boot ID, session ID, and timestamp
-func UpdateLoginMetadata(cfg *config.Config) error {
+func UpdateLoginMetadata(cfg *config.Config) {
 	bootID, err := GetBootID()
 	if err == nil {
 		cfg.AutoLogin.BootID = bootID
@@ -151,19 +151,17 @@ func UpdateLoginMetadata(cfg *config.Config) error {
 	}
 
 	cfg.AutoLogin.LastLoginTime = time.Now()
-
-	return nil
 }
 
-// ClearAutoLogin disables auto-login and clears the keyring
+// ClearAutoLogin disables auto-login and clears the keyring. The config is
+// reset even when the keyring delete fails; that error is returned so the
+// caller can show it.
 func ClearAutoLogin(cfg *config.Config) error {
 	// Only the keyring backend ever has a secret to remove - stsuhi never
 	// writes anything to 1Password itself.
+	var deleteErr error
 	if cfg.AutoLogin.EffectiveBackend() == config.BackendKeyring {
-		if err := keyring.DeletePassword(); err != nil {
-			// Don't fail if already deleted
-			fmt.Printf("Warning: failed to delete from keyring: %v\n", err)
-		}
+		deleteErr = keyring.DeletePassword()
 	}
 
 	// Disable in config
@@ -174,5 +172,5 @@ func ClearAutoLogin(cfg *config.Config) error {
 	cfg.AutoLogin.Backend = config.BackendKeyring
 	cfg.AutoLogin.OnePasswordItemName = ""
 
-	return nil
+	return deleteErr
 }

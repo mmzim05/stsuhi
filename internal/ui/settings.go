@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"stsuhi/internal/config"
+	"github.com/mmzim05/stsuhi/internal/config"
 )
 
 // SettingsOption represents a settings menu option

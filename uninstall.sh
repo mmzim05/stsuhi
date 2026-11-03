@@ -1,38 +1,30 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-set -e
+readonly BIN_PATH="${HOME}/.local/bin/stsuhi"
+readonly DESKTOP_DIR="${HOME}/.local/share/applications"
+readonly DESKTOP_FILE="${DESKTOP_DIR}/stsuhi.desktop"
 
-INSTALL_DIR="$HOME/.local/bin"
-DESKTOP_DIR="$HOME/.local/share/applications"
-BINARY="$INSTALL_DIR/stsuhi"
-DESKTOP_FILE="$DESKTOP_DIR/stsuhi.desktop"
+remove_file() {
+  local path="$1"
+  if [[ -f "$path" ]]; then
+    rm -- "$path"
+    echo "Removed ${path}"
+  else
+    echo "Not found: ${path} (already removed?)"
+  fi
+}
 
-echo "Uninstalling Stsuhi SSH Manager..."
+main() {
+  echo "Uninstalling stsuhi..."
+  remove_file "$BIN_PATH"
+  remove_file "$DESKTOP_FILE"
+  if command -v update-desktop-database &> /dev/null; then
+    update-desktop-database "$DESKTOP_DIR" 2> /dev/null || true
+  fi
+  echo ""
+  echo "Your connection data in ~/.config/stsuhi/ was kept."
+  echo "To remove it too, run: rm -rf ~/.config/stsuhi/"
+}
 
-# Remove binary
-if [ -f "$BINARY" ]; then
-    echo "Removing binary from $BINARY..."
-    rm "$BINARY"
-else
-    echo "Binary not found at $BINARY (already removed?)"
-fi
-
-# Remove desktop file
-if [ -f "$DESKTOP_FILE" ]; then
-    echo "Removing desktop entry from $DESKTOP_FILE..."
-    rm "$DESKTOP_FILE"
-else
-    echo "Desktop file not found at $DESKTOP_FILE (already removed?)"
-fi
-
-# Update desktop database
-if command -v update-desktop-database &> /dev/null; then
-    update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
-fi
-
-echo ""
-echo "✓ Uninstallation complete!"
-echo ""
-echo "Note: Your SSH connection data in ~/.config/stsuhi/ has been preserved."
-echo "To completely remove all data, run:"
-echo "  rm -rf ~/.config/stsuhi/"
+main "$@"

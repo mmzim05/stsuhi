@@ -2,7 +2,7 @@ package ui
 
 import (
 	"github.com/charmbracelet/lipgloss"
-	"stsuhi/internal/theme"
+	"github.com/mmzim05/stsuhi/internal/theme"
 )
 
 // active is the currently applied theme. Package-level so every style

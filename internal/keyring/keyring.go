@@ -87,6 +87,8 @@ func IsAvailable() bool {
 		}
 		return false
 	}
-	keyring.Delete(ServiceName, testKey)
+	if err := keyring.Delete(ServiceName, testKey); err != nil {
+		return false
+	}
 	return true
 }

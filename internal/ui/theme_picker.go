@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"stsuhi/internal/theme"
+	"github.com/mmzim05/stsuhi/internal/theme"
 )
 
 type themeOption struct {

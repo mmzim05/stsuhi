@@ -2,17 +2,17 @@ package ssh
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"unsafe"
 
 	"github.com/creack/pty"
-	"stsuhi/internal/models"
-	"stsuhi/internal/onepassword"
+	"github.com/mmzim05/stsuhi/internal/models"
+	"github.com/mmzim05/stsuhi/internal/onepassword"
 )
 
 // Connect launches an SSH session using the provided connection details
@@ -25,8 +25,12 @@ func Connect(conn *models.Connection) error {
 		conn = resolved
 	}
 
-	// If we have a password, use PTY-based connection for auto-fill
-	if conn.Password != "" {
+	if err := validateTarget(conn); err != nil {
+		return err
+	}
+
+	// A stored password needs the PTY path so it can be auto-typed
+	if conn.Password != "" || conn.SudoPassword != "" {
 		return connectWithPTY(conn)
 	}
 
@@ -93,20 +97,36 @@ func connectWithPTY(conn *models.Connection) error {
 	if err != nil {
 		return fmt.Errorf("failed to start PTY: %w", err)
 	}
+	// Close only fails if already closed, which leaves nothing to clean up
 	defer ptmx.Close()
 
 	cols, rows := 80, 24
 	if size, err := pty.GetsizeFull(os.Stdin); err == nil {
 		cols, rows = int(size.Cols), int(size.Rows)
 	}
-	watcher := newPromptWatcher(conn.User, cols, rows, func() {
-		ptmx.Write([]byte(conn.Password + "\n"))
-	})
+	sudoPassword := conn.SudoPassword
+	if sudoPassword == "" {
+		sudoPassword = conn.Password
+	}
+	term := &terminalIO{out: os.Stdout, pty: ptmx}
+	watcher := newPromptWatcher(conn.User, conn.Password, sudoPassword,
+		cols, rows, promptActions{
+			sendLogin: func(secret string) {
+				reportError("auto-fill", term.sendSecret(secret))
+			},
+			offerSudo: func(secret string) {
+				reportError("sudo prompt", term.offerSudo(secret))
+			},
+			cancelSudo: func() {
+				reportError("sudo prompt", term.cancelOffer())
+			},
+		})
 	defer watcher.Stop()
 
 	// Handle terminal size changes
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGWINCH)
+	defer signal.Stop(ch)
 	go func() {
 		for range ch {
 			if err := pty.InheritSize(os.Stdin, ptmx); err != nil {
@@ -124,14 +144,22 @@ func connectWithPTY(conn *models.Connection) error {
 	if err != nil {
 		return fmt.Errorf("failed to set raw mode: %w", err)
 	}
-	defer restoreMode(os.Stdin.Fd(), oldState)
-
-	// Copy input from user to PTY
-	go func() {
-		io.Copy(ptmx, os.Stdin)
+	defer func() {
+		if err := restoreMode(os.Stdin.Fd(), oldState); err != nil {
+			fmt.Fprintf(os.Stderr, "stsuhi: failed to restore terminal: %v\n", err)
+		}
 	}()
 
-	// Read from PTY and write to stdout, watching for password prompts
+	// Copy input from user to PTY. It ends when the PTY closes; that error
+	// is the normal end of a session, not a failure.
+	go func() {
+		if err := term.forwardInput(os.Stdin); err != nil {
+			return
+		}
+	}()
+
+	// Read from PTY and write to stdout, watching for password prompts.
+	// A read error is the PTY closing at session end.
 	go func() {
 		buf := make([]byte, 1024)
 		for {
@@ -139,7 +167,9 @@ func connectWithPTY(conn *models.Connection) error {
 			if err != nil {
 				return
 			}
-			os.Stdout.Write(buf[:n])
+			if err := term.writeOut(buf[:n]); err != nil {
+				return
+			}
 			watcher.Write(buf[:n])
 		}
 	}()
@@ -156,6 +186,14 @@ func connectWithPTY(conn *models.Connection) error {
 	}
 
 	return nil
+}
+
+// reportError prints a non-fatal session error. The terminal is in raw
+// mode, so the line needs an explicit carriage return.
+func reportError(action string, err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "\r\nstsuhi: %s failed: %v\r\n", action, err)
+	}
 }
 
 // setRawMode sets the terminal to raw mode
@@ -219,11 +257,35 @@ func buildSSHArgs(conn *models.Connection) []string {
 		args = append(args, "-o", fmt.Sprintf("IdentityAgent=%s", conn.SSHAgentSocket))
 	}
 
-	// Add user@host
+	// "--" ends option parsing, so the target can never be read as a flag
 	target := fmt.Sprintf("%s@%s", conn.User, conn.Address)
-	args = append(args, target)
+	args = append(args, "--", target)
 
 	return args
+}
+
+// validateTarget rejects a user or address that ssh could read as an
+// option (e.g. "-oProxyCommand=...") or that holds spaces or control
+// characters. Values can come from a 1Password item, which may be shared,
+// so they are checked here right before ssh runs, not only in the form.
+func validateTarget(conn *models.Connection) error {
+	fields := map[string]string{"user": conn.User, "address": conn.Address}
+	for name, value := range fields {
+		if strings.HasPrefix(value, "-") {
+			return fmt.Errorf("invalid %s %q: must not start with '-'", name, value)
+		}
+		if strings.ContainsFunc(value, isUnsafeRune) {
+			return fmt.Errorf("invalid %s %q: contains spaces or control characters", name, value)
+		}
+	}
+	if strings.Contains(conn.Address, "@") {
+		return fmt.Errorf("invalid address %q: must not contain '@'", conn.Address)
+	}
+	return nil
+}
+
+func isUnsafeRune(r rune) bool {
+	return r <= ' ' || r == 0x7f
 }
 
 // GetSSHCommand returns the SSH command string for display purposes

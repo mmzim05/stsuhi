@@ -7,11 +7,11 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"stsuhi/internal/config"
-	"stsuhi/internal/ssh"
-	"stsuhi/internal/storage"
-	"stsuhi/internal/theme"
-	"stsuhi/internal/ui"
+	"github.com/mmzim05/stsuhi/internal/config"
+	"github.com/mmzim05/stsuhi/internal/ssh"
+	"github.com/mmzim05/stsuhi/internal/storage"
+	"github.com/mmzim05/stsuhi/internal/theme"
+	"github.com/mmzim05/stsuhi/internal/ui"
 )
 
 func main() {

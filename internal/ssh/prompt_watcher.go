@@ -14,7 +14,8 @@ import (
 // could catch a redraw at the moment its cursor passes an old prompt.
 const promptQuiet = 50 * time.Millisecond
 
-// promptWatcher decides when to auto-type the stored password. It keeps a
+// promptWatcher decides when to auto-type the SSH login password and when
+// to offer the sudo password (the user confirms each sudo insert). It keeps a
 // virtual copy of the screen and only treats a prompt as live when the
 // cursor is sitting right after it. Matching raw output instead misfires
 // on full-screen apps (e.g. a multiplexer redrawing a tab that still shows
@@ -24,21 +25,37 @@ type promptWatcher struct {
 	vt         vt10x.Terminal
 	pending    []byte // trailing bytes of a UTF-8 rune split across reads
 	sudoPrompt *regexp.Regexp
-	send       func()
+	login      string // SSH login password; empty skips the login prompt
+	sudo       string // sudo password; empty never answers sudo
+	sendLogin  func(secret string)
+	offerSudo  func(secret string)
+	cancelSudo func()
 	timer      *time.Timer
 
 	mu        sync.Mutex
 	loginSent bool // SSH login password goes out at most once
-	answered  bool // current prompt already answered; cleared once it's gone
+	answered  bool // current sudo prompt already offered; cleared once it's gone
 }
 
-func newPromptWatcher(user string, cols, rows int, send func()) *promptWatcher {
+// promptActions are what a promptWatcher does at each kind of prompt
+type promptActions struct {
+	sendLogin  func(secret string)
+	offerSudo  func(secret string)
+	cancelSudo func()
+}
+
+func newPromptWatcher(user, login, sudo string, cols, rows int, actions promptActions) *promptWatcher {
 	w := &promptWatcher{
 		vt: vt10x.New(vt10x.WithSize(cols, rows)),
 		// Only auto-fill sudo for the SSH user (not docker containers, etc.)
 		// Format: "[sudo] password for username:"
 		sudoPrompt: regexp.MustCompile(`\[sudo\] password for ` + regexp.QuoteMeta(strings.ToLower(user)) + `:$`),
-		send:       send,
+		login:      login,
+		sudo:       sudo,
+		sendLogin:  actions.sendLogin,
+		offerSudo:  actions.offerSudo,
+		cancelSudo: actions.cancelSudo,
+		loginSent:  login == "",
 	}
 	w.timer = time.AfterFunc(time.Hour, w.check)
 	w.timer.Stop()
@@ -48,6 +65,8 @@ func newPromptWatcher(user string, cols, rows int, send func()) *promptWatcher {
 // Write feeds PTY output to the virtual screen and re-arms the quiet timer
 func (w *promptWatcher) Write(p []byte) {
 	data := append(w.pending, p...)
+	// vt10x only returns io errors from its in-memory reader, which can't
+	// fail; n is what matters, to keep a split rune for the next read
 	n, _ := w.vt.Write(data)
 	w.pending = append([]byte(nil), data[n:]...)
 	w.timer.Reset(promptQuiet)
@@ -67,21 +86,25 @@ func (w *promptWatcher) check() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	var match bool
 	if !w.loginSent {
-		match = strings.HasSuffix(line, "password:")
-	} else {
-		match = w.sudoPrompt.MatchString(line)
+		if strings.HasSuffix(line, "password:") {
+			w.sendLogin(w.login)
+			w.loginSent = true
+		}
+		return
 	}
-	if !match {
+
+	if w.sudo == "" || !w.sudoPrompt.MatchString(line) {
+		if w.answered {
+			w.cancelSudo()
+		}
 		w.answered = false
 		return
 	}
 	if w.answered {
 		return
 	}
-	w.send()
-	w.loginSent = true
+	w.offerSudo(w.sudo)
 	w.answered = true
 }
 

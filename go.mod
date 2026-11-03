@@ -1,4 +1,4 @@
-module stsuhi
+module github.com/mmzim05/stsuhi
 
 go 1.25.5
 
