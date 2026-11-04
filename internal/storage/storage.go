@@ -16,6 +16,15 @@ type Storage interface {
 	// VerifyMasterPassword checks if the provided password matches the stored hash
 	VerifyMasterPassword(password string) (bool, error)
 
+	// ResetMasterPassword forgets the master password for good: it deletes
+	// the stored hash and every connection with an encrypted secret, which
+	// can no longer be decrypted. Connections without one are kept.
+	ResetMasterPassword() error
+
+	// KeyringAccount names this data directory's master key entry in the
+	// OS keyring, so separate directories never share a key.
+	KeyringAccount() string
+
 	// SaveConnection writes a connection's metadata in the clear and
 	// encrypts any local secret (password/passkey/sudo password) with
 	// masterPassword. masterPassword may be "" if the connection has no

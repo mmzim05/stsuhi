@@ -7,7 +7,6 @@ import (
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/mmzim05/stsuhi/internal/models"
 )
@@ -83,16 +82,19 @@ func (connectionDelegate) Render(w io.Writer, m list.Model, index int, listItem 
 		rowPrefix = selectedPrefix
 	}
 
-	fmt.Fprintf(w, "%s\n%s",
+	// Render can't return an error; a failed write just leaves the row
+	// blank, and the list redraws on the next frame anyway.
+	if _, err := fmt.Fprintf(w, "%s\n%s",
 		titleStyle.Width(width).Render(rowPrefix+title),
 		descStyle.Width(width).Render(rowPrefix+desc),
-	)
+	); err != nil {
+		return
+	}
 }
 
 // ConnectionList is a model for the connection list view
 type ConnectionList struct {
-	list     list.Model
-	selected *models.Connection
+	list list.Model
 }
 
 // NewConnectionList creates a new connection list
@@ -134,7 +136,8 @@ func (cl ConnectionList) View() string {
 	var b strings.Builder
 	b.WriteString(cl.list.View())
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("↑/↓ or j/k: navigate • enter: connect • a: add • e: edit • d: delete • s: settings • q: quit"))
+	b.WriteString(helpStyle.Render("↑/↓ or j/k: navigate • enter: connect • " +
+		"a: add • e: edit • d: delete • s: settings • q: quit"))
 	return b.String()
 }
 
@@ -147,9 +150,13 @@ func (cl ConnectionList) SelectedConnection() *models.Connection {
 	return item.(connectionItem).conn
 }
 
-// SetSize sets the size of the list
+// maxListWidth keeps rows readable on wide terminals; App.View centers
+// the narrower list instead of pinning it to the left edge
+const maxListWidth = 100
+
+// SetSize fits the list to a width by height terminal
 func (cl *ConnectionList) SetSize(width, height int) {
-	cl.list.SetSize(width, height-4) // Reserve space for help text
+	cl.list.SetSize(min(width, maxListWidth), height-4) // room for help text
 }
 
 // UpdateConnections updates the list with new connections
@@ -176,9 +183,5 @@ func EmptyView() string {
 	b.WriteString(helpStyle.Render("Press 'a' to add your first connection"))
 	b.WriteString("\n")
 	b.WriteString(helpStyle.Render("Press 'q' to quit"))
-	return lipgloss.Place(
-		80, 20,
-		lipgloss.Center, lipgloss.Center,
-		b.String(),
-	)
+	return b.String()
 }

@@ -22,6 +22,7 @@ const (
 	readTimeout = 15 * time.Second
 )
 
+// ErrItemNameInvalid is returned when no 1Password item name is given.
 var ErrItemNameInvalid = errors.New("1password item name cannot be empty")
 
 // IsAvailable checks whether the 1Password CLI is installed and on PATH.

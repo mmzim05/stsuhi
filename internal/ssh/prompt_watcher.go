@@ -65,9 +65,15 @@ func newPromptWatcher(user, login, sudo string, cols, rows int, actions promptAc
 // Write feeds PTY output to the virtual screen and re-arms the quiet timer
 func (w *promptWatcher) Write(p []byte) {
 	data := append(w.pending, p...)
-	// vt10x only returns io errors from its in-memory reader, which can't
-	// fail; n is what matters, to keep a split rune for the next read
-	n, _ := w.vt.Write(data)
+	n, err := w.vt.Write(data)
+	if err != nil {
+		// The virtual screen is only a guide for prompt detection, so a
+		// bad write drops the chunk rather than the session.
+		w.pending = nil
+		w.timer.Reset(promptQuiet)
+		return
+	}
+	// Keep the tail of a rune split across reads for the next write
 	w.pending = append([]byte(nil), data[n:]...)
 	w.timer.Reset(promptQuiet)
 }

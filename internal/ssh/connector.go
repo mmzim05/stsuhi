@@ -30,7 +30,7 @@ func Connect(conn *models.Connection) error {
 	}
 
 	// A stored password needs the PTY path so it can be auto-typed
-	if conn.Password != "" || conn.SudoPassword != "" {
+	if conn.Password != "" {
 		return connectWithPTY(conn)
 	}
 
@@ -92,24 +92,22 @@ func connectWithPTY(conn *models.Connection) error {
 	args := buildSSHArgs(conn)
 	cmd := exec.Command("ssh", args...)
 
-	// Start the command with a PTY
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		return fmt.Errorf("failed to start PTY: %w", err)
 	}
-	// Close only fails if already closed, which leaves nothing to clean up
-	defer ptmx.Close()
+	defer func() {
+		if err := ptmx.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "stsuhi: failed to close PTY: %v\n", err)
+		}
+	}()
 
 	cols, rows := 80, 24
 	if size, err := pty.GetsizeFull(os.Stdin); err == nil {
 		cols, rows = int(size.Cols), int(size.Rows)
 	}
-	sudoPassword := conn.SudoPassword
-	if sudoPassword == "" {
-		sudoPassword = conn.Password
-	}
 	term := &terminalIO{out: os.Stdout, pty: ptmx}
-	watcher := newPromptWatcher(conn.User, conn.Password, sudoPassword,
+	watcher := newPromptWatcher(conn.User, conn.Password, conn.Password,
 		cols, rows, promptActions{
 			sendLogin: func(secret string) {
 				reportError("auto-fill", term.sendSecret(secret))
@@ -123,7 +121,6 @@ func connectWithPTY(conn *models.Connection) error {
 		})
 	defer watcher.Stop()
 
-	// Handle terminal size changes
 	ch := make(chan os.Signal, 1)
 	signal.Notify(ch, syscall.SIGWINCH)
 	defer signal.Stop(ch)
@@ -139,7 +136,6 @@ func connectWithPTY(conn *models.Connection) error {
 	}()
 	ch <- syscall.SIGWINCH // Initial resize
 
-	// Set stdin in raw mode
 	oldState, err := setRawMode(os.Stdin.Fd())
 	if err != nil {
 		return fmt.Errorf("failed to set raw mode: %w", err)
@@ -150,13 +146,7 @@ func connectWithPTY(conn *models.Connection) error {
 		}
 	}()
 
-	// Copy input from user to PTY. It ends when the PTY closes; that error
-	// is the normal end of a session, not a failure.
-	go func() {
-		if err := term.forwardInput(os.Stdin); err != nil {
-			return
-		}
-	}()
+	go term.forwardInput(os.Stdin)
 
 	// Read from PTY and write to stdout, watching for password prompts.
 	// A read error is the PTY closing at session end.
@@ -174,7 +164,6 @@ func connectWithPTY(conn *models.Connection) error {
 		}
 	}()
 
-	// Wait for the command to finish
 	if err := cmd.Wait(); err != nil {
 		// Exit status 255 usually means connection closed normally
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -223,16 +212,20 @@ func restoreMode(fd uintptr, state *syscall.Termios) error {
 // getTermios gets the terminal attributes
 func getTermios(fd uintptr) (*syscall.Termios, error) {
 	var termios syscall.Termios
-	if _, _, err := syscall.Syscall(syscall.SYS_IOCTL, fd, syscall.TCGETS, uintptr(unsafe.Pointer(&termios))); err != 0 {
-		return nil, err
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, syscall.TCGETS,
+		uintptr(unsafe.Pointer(&termios)))
+	if errno != 0 {
+		return nil, fmt.Errorf("get terminal attributes: %w", errno)
 	}
 	return &termios, nil
 }
 
 // setTermios sets the terminal attributes
 func setTermios(fd uintptr, termios *syscall.Termios) error {
-	if _, _, err := syscall.Syscall(syscall.SYS_IOCTL, fd, syscall.TCSETS, uintptr(unsafe.Pointer(termios))); err != 0 {
-		return err
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, syscall.TCSETS,
+		uintptr(unsafe.Pointer(termios)))
+	if errno != 0 {
+		return fmt.Errorf("set terminal attributes: %w", errno)
 	}
 	return nil
 }
@@ -241,12 +234,10 @@ func setTermios(fd uintptr, termios *syscall.Termios) error {
 func buildSSHArgs(conn *models.Connection) []string {
 	args := make([]string, 0)
 
-	// Add port if not default
 	if conn.Port != 22 {
 		args = append(args, "-p", strconv.Itoa(conn.Port))
 	}
 
-	// Add identity file if using key authentication
 	if conn.PasskeyPath != "" {
 		args = append(args, "-i", conn.PasskeyPath)
 	}

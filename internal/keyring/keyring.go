@@ -1,94 +1,78 @@
+// Package keyring keeps stsuhi's master key in the OS keyring (Secret
+// Service, macOS Keychain or Windows Credential Manager).
 package keyring
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/zalando/go-keyring"
 )
 
-const (
-	ServiceName = "stsuhi"
-	Username    = "master-password"
-)
+// ServiceName groups every stsuhi entry in the keyring.
+const ServiceName = "stsuhi"
 
-// SavePassword stores the master password in the OS keyring
-func SavePassword(password string) error {
-	err := keyring.Set(ServiceName, Username, password)
-	if err != nil {
+// DefaultAccount is the entry for the default data directory. It is the
+// name older versions used for the auto-login copy of the master password,
+// so an existing cached password keeps working.
+const DefaultAccount = "master-password"
+
+// ErrNotFound is returned by GetPassword when the entry doesn't exist.
+var ErrNotFound = errors.New("no master key in keyring")
+
+// SavePassword stores password in the keyring entry account
+func SavePassword(account, password string) error {
+	if err := keyring.Set(ServiceName, account, password); err != nil {
 		return formatKeyringError("save", err)
 	}
 	return nil
 }
 
-// GetPassword retrieves the master password from the OS keyring
-func GetPassword() (string, error) {
-	password, err := keyring.Get(ServiceName, Username)
+// GetPassword reads the keyring entry account
+func GetPassword(account string) (string, error) {
+	password, err := keyring.Get(ServiceName, account)
+	if errors.Is(err, keyring.ErrNotFound) {
+		return "", ErrNotFound
+	}
 	if err != nil {
-		if err == keyring.ErrNotFound {
-			return "", fmt.Errorf("password not found in keyring")
-		}
-		return "", formatKeyringError("retrieve", err)
+		return "", formatKeyringError("read", err)
 	}
 	return password, nil
 }
 
-// formatKeyringError provides helpful error messages for common keyring issues
-func formatKeyringError(operation string, err error) error {
-	errStr := err.Error()
-
-	// Check for common Linux Secret Service errors
-	if contains(errStr, "not activatable") || contains(errStr, "Cannot autolaunch") {
-		return fmt.Errorf("keyring not available - install gnome-keyring or kwallet5 and ensure it's running")
-	}
-
-	if contains(errStr, "Failed to unlock") || contains(errStr, "denied") {
-		return fmt.Errorf("keyring access denied - unlock your keyring first")
-	}
-
-	return fmt.Errorf("failed to %s password in keyring: %w", operation, err)
-}
-
-// contains checks if a string contains a substring (case-insensitive helper)
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 ||
-		(len(s) > 0 && len(substr) > 0 && stringContains(s, substr)))
-}
-
-func stringContains(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
-
-// DeletePassword removes the master password from the OS keyring
-func DeletePassword() error {
-	err := keyring.Delete(ServiceName, Username)
-	if err != nil {
-		if err == keyring.ErrNotFound {
-			return nil // Already deleted
-		}
-		return fmt.Errorf("failed to delete password from keyring: %w", err)
+// DeletePassword removes the keyring entry account. A missing entry is
+// not an error.
+func DeletePassword(account string) error {
+	err := keyring.Delete(ServiceName, account)
+	if err != nil && !errors.Is(err, keyring.ErrNotFound) {
+		return formatKeyringError("delete", err)
 	}
 	return nil
 }
 
-// IsAvailable checks if the keyring is available on this system
+// IsAvailable reports whether a keyring is running and writable, by
+// writing and removing a test entry
 func IsAvailable() bool {
-	// Try to set and delete a test value
-	testKey := "test-availability-check"
-	err := keyring.Set(ServiceName, testKey, "test")
-	if err != nil {
-		// If we get the "not activatable" error, keyring is not available
-		if contains(err.Error(), "not activatable") || contains(err.Error(), "Cannot autolaunch") {
-			return false
-		}
+	const testAccount = "test-availability-check"
+	if err := keyring.Set(ServiceName, testAccount, "test"); err != nil {
 		return false
 	}
-	if err := keyring.Delete(ServiceName, testKey); err != nil {
-		return false
+	return keyring.Delete(ServiceName, testAccount) == nil
+}
+
+// formatKeyringError turns common Secret Service failures into advice
+func formatKeyringError(operation string, err error) error {
+	message := err.Error()
+	if strings.Contains(message, "not activatable") ||
+		strings.Contains(message, "Cannot autolaunch") {
+		return fmt.Errorf("keyring not available: install gnome-keyring "+
+			"or kwallet and make sure it is running: %w", err)
 	}
-	return true
+	if strings.Contains(message, "Failed to unlock") ||
+		strings.Contains(message, "denied") {
+		return fmt.Errorf("keyring access denied, unlock your keyring "+
+			"first: %w", err)
+	}
+	return fmt.Errorf("%s master key in keyring: %w", operation, err)
 }

@@ -4,39 +4,29 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"time"
 )
 
-// SecurityRules defines when auto-login should be cleared
-type SecurityRules struct {
-	ClearOnReboot    bool `json:"clear_on_reboot"`
-	ClearOnLock      bool `json:"clear_on_lock"`
-	ClearOnIdle      bool `json:"clear_on_idle"`
-	IdleTimeoutHours int  `json:"idle_timeout_hours"`
-	NeverClear       bool `json:"never_clear"`
+// UnlockConfig says whether the master password is read from a 1Password
+// item. It only matters on machines without a keyring, where the password
+// would otherwise be asked for. The JSON names are those older versions
+// used for auto-login, so an existing 1Password setup keeps working.
+type UnlockConfig struct {
+	Enabled             bool   `json:"enabled"`
+	Backend             string `json:"backend,omitempty"`
+	OnePasswordItemName string `json:"onepassword_item_name,omitempty"`
 }
 
-// AutoLoginConfig stores auto-login settings
-type AutoLoginConfig struct {
-	Enabled             bool          `json:"enabled"`
-	SecurityRules       SecurityRules `json:"security_rules"`
-	LastLoginTime       time.Time     `json:"last_login_timestamp"`
-	BootID              string        `json:"boot_id"`
-	SessionID           string        `json:"session_id"`
-	DontAskAgain        bool          `json:"dont_ask_again"`
-	Backend             string        `json:"backend"` // "keyring" (default) or "1password"
-	OnePasswordItemName string        `json:"onepassword_item_name,omitempty"`
-}
+// BackendOnePassword marks the 1Password unlock in UnlockConfig.Backend.
+const BackendOnePassword = "1password"
 
-// BackendKeyring and BackendOnePassword identify the supported auto-login backends.
-const (
-	BackendKeyring     = "keyring"
-	BackendOnePassword = "1password"
-)
+// UsesOnePassword reports whether the master password comes from 1Password
+func (u UnlockConfig) UsesOnePassword() bool {
+	return u.Enabled && u.Backend == BackendOnePassword
+}
 
 // Config represents the application configuration
 type Config struct {
-	AutoLogin AutoLoginConfig `json:"auto_login"`
+	Unlock UnlockConfig `json:"auto_login"`
 
 	// Theme selects the UI color palette: "" (adaptive built-in default),
 	// "omarchy" (follow the desktop's current Omarchy theme), or
@@ -44,36 +34,13 @@ type Config struct {
 	Theme string `json:"theme,omitempty"`
 }
 
-// EffectiveBackend returns the configured auto-login backend, treating an
-// empty value (configs written before the backend field existed) as keyring.
-func (a *AutoLoginConfig) EffectiveBackend() string {
-	if a.Backend == "" {
-		return BackendKeyring
-	}
-	return a.Backend
-}
-
 // GetDefault returns the default configuration
 func GetDefault() *Config {
-	return &Config{
-		AutoLogin: AutoLoginConfig{
-			Enabled: false,
-			SecurityRules: SecurityRules{
-				ClearOnReboot:    true,
-				ClearOnLock:      false,
-				ClearOnIdle:      false,
-				IdleTimeoutHours: 24,
-				NeverClear:       false,
-			},
-			DontAskAgain: true, // Don't prompt for auto-login by default
-			Backend:      BackendKeyring,
-		},
-	}
+	return &Config{}
 }
 
 // Load reads the configuration from a file
 func Load(configPath string) (*Config, error) {
-	// If file doesn't exist, return default config
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
 		return GetDefault(), nil
 	}
@@ -85,7 +52,7 @@ func Load(configPath string) (*Config, error) {
 
 	var config Config
 	if err := json.Unmarshal(data, &config); err != nil {
-		// If JSON is invalid, return default config
+		// A corrupt config shouldn't lock the user out; start from defaults.
 		return GetDefault(), nil
 	}
 
@@ -99,7 +66,7 @@ func Save(configPath string, config *Config) error {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 
-	// Write with restricted permissions (user read/write only)
+	// 0600 like every file under the storage directory
 	if err := os.WriteFile(configPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}

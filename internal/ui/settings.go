@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -11,10 +10,11 @@ import (
 // SettingsOption represents a settings menu option
 type SettingsOption int
 
+// SettingsOption values, in menu order.
 const (
-	SettingsEnable SettingsOption = iota
-	SettingsReconfigure
-	SettingsDisable
+	SettingsOnePasswordEnable SettingsOption = iota
+	SettingsOnePasswordChange
+	SettingsOnePasswordDisable
 	SettingsTheme
 	SettingsOnePasswordHelp
 	SettingsBack
@@ -22,22 +22,20 @@ const (
 
 // Settings is the model for the settings screen
 type Settings struct {
-	config         *config.Config
-	selectedOption SettingsOption
+	config           *config.Config
+	keyringAvailable bool
+	selectedOption   SettingsOption
 }
 
-// NewSettings creates a new settings screen
-func NewSettings(cfg *config.Config) Settings {
-	// Start at first available option
-	selected := SettingsEnable
-	if cfg.AutoLogin.Enabled {
-		// If auto-login is enabled, skip the enable option
-		selected = SettingsReconfigure
+// NewSettings creates a new settings screen. The 1Password unlock options
+// only appear without a keyring: with one, the master key lives there.
+func NewSettings(cfg *config.Config, keyringAvailable bool) Settings {
+	s := Settings{config: cfg, keyringAvailable: keyringAvailable}
+	for s.selectedOption < SettingsBack &&
+		!s.isOptionEnabled(s.selectedOption) {
+		s.selectedOption++
 	}
-	return Settings{
-		config:         cfg,
-		selectedOption: selected,
-	}
+	return s
 }
 
 // Init initializes the settings screen
@@ -45,10 +43,9 @@ func (s Settings) Init() tea.Cmd {
 	return nil
 }
 
-// Update updates the settings screen
+// Update moves the selection
 func (s Settings) Update(msg tea.Msg) (Settings, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	if msg, ok := msg.(tea.KeyMsg); ok {
 		switch msg.String() {
 		case "up", "k":
 			s.navigateUp()
@@ -56,43 +53,37 @@ func (s Settings) Update(msg tea.Msg) (Settings, tea.Cmd) {
 			s.navigateDown()
 		}
 	}
-
 	return s, nil
 }
 
-// navigateUp moves selection up, skipping disabled options
+// navigateUp moves selection up, skipping hidden options
 func (s *Settings) navigateUp() {
-	for {
-		if s.selectedOption <= 0 {
-			return
-		}
-		s.selectedOption--
-		if s.isOptionEnabled(s.selectedOption) {
+	for opt := s.selectedOption - 1; opt >= 0; opt-- {
+		if s.isOptionEnabled(opt) {
+			s.selectedOption = opt
 			return
 		}
 	}
 }
 
-// navigateDown moves selection down, skipping disabled options
+// navigateDown moves selection down, skipping hidden options
 func (s *Settings) navigateDown() {
-	for {
-		if s.selectedOption >= SettingsBack {
-			return
-		}
-		s.selectedOption++
-		if s.isOptionEnabled(s.selectedOption) {
+	for opt := s.selectedOption + 1; opt <= SettingsBack; opt++ {
+		if s.isOptionEnabled(opt) {
+			s.selectedOption = opt
 			return
 		}
 	}
 }
 
-// isOptionEnabled checks if an option should be enabled
+// isOptionEnabled reports whether opt is shown
 func (s *Settings) isOptionEnabled(opt SettingsOption) bool {
+	usesOnePassword := s.config.Unlock.UsesOnePassword()
 	switch opt {
-	case SettingsEnable:
-		return !s.config.AutoLogin.Enabled
-	case SettingsReconfigure, SettingsDisable:
-		return s.config.AutoLogin.Enabled
+	case SettingsOnePasswordEnable:
+		return !s.keyringAvailable && !usesOnePassword
+	case SettingsOnePasswordChange, SettingsOnePasswordDisable:
+		return !s.keyringAvailable && usesOnePassword
 	case SettingsTheme, SettingsOnePasswordHelp, SettingsBack:
 		return true
 	default:
@@ -107,81 +98,52 @@ func (s Settings) View() string {
 	b.WriteString(titleStyle.Render("Settings"))
 	b.WriteString("\n\n")
 
-	// Auto-login status
-	b.WriteString(labelStyle.Render("Auto-Login Status: "))
-	if s.config.AutoLogin.Enabled {
-		backendLabel := "OS Keyring"
-		if s.config.AutoLogin.EffectiveBackend() == config.BackendOnePassword {
-			backendLabel = "1Password"
-		}
-		b.WriteString(successStyle.Render(fmt.Sprintf("Enabled (%s)", backendLabel)))
-	} else {
-		b.WriteString(subtitleStyle.Render("Disabled"))
+	b.WriteString(labelStyle.Render("Master key: "))
+	switch {
+	case s.keyringAvailable:
+		b.WriteString(successStyle.Render("stored in the system keyring"))
+	case s.config.Unlock.UsesOnePassword():
+		b.WriteString(successStyle.Render("read from 1Password item " +
+			s.config.Unlock.OnePasswordItemName))
+	default:
+		b.WriteString(subtitleStyle.Render(
+			"no keyring found, asked for when needed"))
 	}
 	b.WriteString("\n\n")
 
-	// If auto-login is enabled, show current rules
-	if s.config.AutoLogin.Enabled {
-		b.WriteString(subtitleStyle.Render("Current Security Rules:"))
-		b.WriteString("\n")
-
-		rules := s.config.AutoLogin.SecurityRules
-		if rules.NeverClear {
-			b.WriteString("  • Never clear - always persist\n")
-		} else {
-			if rules.ClearOnReboot {
-				b.WriteString("  • Clear after system reboot\n")
-			}
-			if rules.ClearOnLock {
-				b.WriteString("  • Clear after logout/lock\n")
-			}
-			if rules.ClearOnIdle {
-				b.WriteString(fmt.Sprintf("  • Clear after %d hours idle\n", rules.IdleTimeoutHours))
-			}
-		}
-		b.WriteString("\n")
-	}
-
-	// Theme
 	b.WriteString(labelStyle.Render("Theme: "))
 	b.WriteString(subtitleStyle.Render(ThemeLabel(s.config.Theme)))
 	b.WriteString("\n\n")
 
-	// Menu options
 	b.WriteString(subtitleStyle.Render("Options:"))
 	b.WriteString("\n")
 
 	options := []struct {
-		opt     SettingsOption
-		label   string
-		enabled bool
+		opt   SettingsOption
+		label string
 	}{
-		{SettingsEnable, "Enable auto-login", !s.config.AutoLogin.Enabled},
-		{SettingsReconfigure, "Reconfigure auto-login", s.config.AutoLogin.Enabled},
-		{SettingsDisable, "Disable auto-login", s.config.AutoLogin.Enabled},
-		{SettingsTheme, "Change theme", true},
-		{SettingsOnePasswordHelp, "1Password setup instructions", true},
-		{SettingsBack, "Back to connections", true},
+		{SettingsOnePasswordEnable, "Unlock with 1Password"},
+		{SettingsOnePasswordChange, "Change 1Password item"},
+		{SettingsOnePasswordDisable, "Stop unlocking with 1Password"},
+		{SettingsTheme, "Change theme"},
+		{SettingsOnePasswordHelp, "1Password setup instructions"},
+		{SettingsBack, "Back to connections"},
 	}
-
 	for _, opt := range options {
-		if !opt.enabled {
-			continue // Don't show disabled options
+		if !s.isOptionEnabled(opt.opt) {
+			continue
 		}
-
-		prefix := "  "
 		if opt.opt == s.selectedOption {
-			prefix = "→ "
-			b.WriteString(labelStyle.Render(prefix + opt.label))
+			b.WriteString(labelStyle.Render("→ " + opt.label))
 		} else {
-			b.WriteString(prefix + opt.label)
+			b.WriteString("  " + opt.label)
 		}
 		b.WriteString("\n")
 	}
 
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("↑/↓ or j/k: navigate • enter: select • esc: back"))
-
+	b.WriteString(helpStyle.Render(
+		"↑/↓ or j/k: navigate • enter: select • esc: back"))
 	return b.String()
 }
 

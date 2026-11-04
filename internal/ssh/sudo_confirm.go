@@ -66,17 +66,19 @@ func (t *terminalIO) clearLocked() error {
 	return err
 }
 
-// forwardInput copies the user's keystrokes to the remote session until
-// in fails, answering a pending sudo offer with the first key
-func (t *terminalIO) forwardInput(in io.Reader) error {
+// forwardInput copies the user's keystrokes to the remote session,
+// answering a pending sudo offer with the first key. It stops at the first
+// read or write error: that is the PTY closing at the end of the session,
+// not a failure to report.
+func (t *terminalIO) forwardInput(in io.Reader) {
 	buf := make([]byte, 1024)
 	for {
 		n, err := in.Read(buf)
 		if err != nil {
-			return err
+			return
 		}
 		if err := t.handleInput(buf[:n]); err != nil {
-			return err
+			return
 		}
 	}
 }

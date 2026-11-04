@@ -15,7 +15,6 @@ const (
 	fieldAddress
 	fieldPort
 	fieldPassword
-	fieldSudoPassword
 	fieldPasskeyPath
 	fieldUseSSHAgent
 	fieldSSHAgentSocket
@@ -68,15 +67,9 @@ func NewConnectionForm(conn *models.Connection) ConnectionForm {
 
 	// Password
 	inputs[fieldPassword] = textinput.New()
-	inputs[fieldPassword].Placeholder = "password (optional if using key)"
+	inputs[fieldPassword].Placeholder = "for SSH login and sudo (optional with a key)"
 	inputs[fieldPassword].EchoMode = textinput.EchoPassword
 	inputs[fieldPassword].EchoCharacter = '•'
-
-	// Sudo Password (auto-typed at "[sudo] password for <user>:")
-	inputs[fieldSudoPassword] = textinput.New()
-	inputs[fieldSudoPassword].Placeholder = "optional, defaults to the password above"
-	inputs[fieldSudoPassword].EchoMode = textinput.EchoPassword
-	inputs[fieldSudoPassword].EchoCharacter = '•'
 
 	// Passkey Path
 	inputs[fieldPasskeyPath] = textinput.New()
@@ -98,6 +91,12 @@ func NewConnectionForm(conn *models.Connection) ConnectionForm {
 	inputs[fieldOnePasswordItem].Placeholder = "item name storing username + password"
 	inputs[fieldOnePasswordItem].CharLimit = 100
 
+	// bubbles shows only the placeholder's first rune when Width is 0.
+	// 64 fits the longest placeholder (the SSH agent socket).
+	for i := range inputs {
+		inputs[i].Width = 64
+	}
+
 	form := ConnectionForm{
 		inputs:       inputs,
 		focusedField: 0,
@@ -116,7 +115,6 @@ func NewConnectionForm(conn *models.Connection) ConnectionForm {
 		inputs[fieldAddress].SetValue(conn.Address)
 		inputs[fieldPort].SetValue(strconv.Itoa(conn.Port))
 		inputs[fieldPassword].SetValue(conn.Password)
-		inputs[fieldSudoPassword].SetValue(conn.SudoPassword)
 		inputs[fieldPasskeyPath].SetValue(conn.PasskeyPath)
 		inputs[fieldSSHAgentSocket].SetValue(conn.SSHAgentSocket)
 		inputs[fieldOnePasswordVault].SetValue(conn.OnePasswordVault)
@@ -203,7 +201,6 @@ func (f ConnectionForm) View() string {
 		"Address:",
 		"Port:",
 		"Password:",
-		"Sudo Password:",
 		"Passkey Path:",
 	}
 
@@ -338,7 +335,7 @@ func (f *ConnectionForm) renderField(b *strings.Builder, field int, label string
 }
 
 // ToConnection converts form values to a Connection model. Leaving
-// Password, SudoPassword and PasskeyPath blank means this connection has no local
+// Password and PasskeyPath blank means this connection has no local
 // secret at all (1Password/SSH-agent-only) - see
 // storage.FileStorage.SaveConnection, which seals every field together
 // whenever either is set, and leaves everything in the clear when not.
@@ -355,7 +352,6 @@ func (f *ConnectionForm) ToConnection() (*models.Connection, error) {
 	conn.User = strings.TrimSpace(f.inputs[fieldUser].Value())
 	conn.Address = strings.TrimSpace(f.inputs[fieldAddress].Value())
 	conn.Password = f.inputs[fieldPassword].Value()
-	conn.SudoPassword = f.inputs[fieldSudoPassword].Value()
 	conn.PasskeyPath = strings.TrimSpace(f.inputs[fieldPasskeyPath].Value())
 	conn.UseSSHAgent = f.useSSHAgent
 	conn.SSHAgentSocket = strings.TrimSpace(f.inputs[fieldSSHAgentSocket].Value())

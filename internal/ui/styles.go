@@ -5,11 +5,6 @@ import (
 	"github.com/mmzim05/stsuhi/internal/theme"
 )
 
-// active is the currently applied theme. Package-level so every style
-// below can be rebuilt from it without threading a Theme through every
-// model - see SetTheme.
-var active theme.Theme
-
 var (
 	titleStyle     lipgloss.Style
 	subtitleStyle  lipgloss.Style
@@ -36,8 +31,6 @@ func init() {
 // user picks a different theme in Settings - to switch live: every View()
 // reads these package-level styles fresh on each render.
 func SetTheme(t theme.Theme) {
-	active = t
-
 	titleStyle = lipgloss.NewStyle().
 		Bold(true).
 		Foreground(t.BrightForeground).

@@ -9,12 +9,14 @@ import (
 	"github.com/google/uuid"
 )
 
+// Errors returned by Connection.Validate.
 var (
-	ErrEmptyServerName      = errors.New("server name cannot be empty")
-	ErrEmptyUser            = errors.New("user cannot be empty")
-	ErrEmptyAddress         = errors.New("address cannot be empty")
-	ErrInvalidPort          = errors.New("port must be between 1 and 65535")
-	ErrNoAuthMethod         = errors.New("password, passkey path, SSH agent, or 1Password item must be provided")
+	ErrEmptyServerName = errors.New("server name cannot be empty")
+	ErrEmptyUser       = errors.New("user cannot be empty")
+	ErrEmptyAddress    = errors.New("address cannot be empty")
+	ErrInvalidPort     = errors.New("port must be between 1 and 65535")
+	ErrNoAuthMethod    = errors.New(
+		"password, passkey path, SSH agent, or 1Password item must be provided")
 	ErrEmptyOnePasswordItem = errors.New("1Password item name cannot be empty")
 )
 
@@ -27,7 +29,6 @@ type Connection struct {
 	Port             int       `json:"port"`
 	Password         string    `json:"password,omitempty"`
 	PasskeyPath      string    `json:"passkey_path,omitempty"`
-	SudoPassword     string    `json:"sudo_password,omitempty"`
 	UseSSHAgent      bool      `json:"use_ssh_agent,omitempty"`
 	SSHAgentSocket   string    `json:"ssh_agent_socket,omitempty"`
 	UseOnePassword   bool      `json:"use_one_password,omitempty"`
@@ -64,12 +65,12 @@ func NewConnection() *Connection {
 }
 
 // HasLocalSecret reports whether this connection currently holds secret
-// material (typed password/passkey path/sudo password) that needs to be
+// material (typed password/passkey path) that needs to be
 // encrypted with a master password before it can be saved. Distinct from
 // HasStoredSecret, which reflects what's already on disk for a previously
 // saved connection, not what's in these fields right now.
 func (c *Connection) HasLocalSecret() bool {
-	return c.Password != "" || c.PasskeyPath != "" || c.SudoPassword != ""
+	return c.Password != "" || c.PasskeyPath != ""
 }
 
 // Validate checks if the connection has all required fields

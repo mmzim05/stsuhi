@@ -17,13 +17,13 @@ Save your servers once, pick one from a list, and stsuhi opens a normal
   item.
 - **Password auto-fill.** stsuhi types a stored password at the SSH login
   prompt. At a `[sudo] password for <user>:` prompt it asks first, and
-  inserts the saved sudo password only when you press `y`.
+  inserts the same password only when you press `y`.
 - **Encrypted at rest.** Saved passwords, key paths, and the host details
-  that go with them are encrypted with AES-256-GCM under a master password.
+  that go with them are encrypted with AES-256-GCM.
 - **1Password integration.** Pull username, password, and host from a
   1Password item, so nothing secret is stored on disk.
-- **Optional auto-login** through the OS keyring or 1Password, with rules to
-  forget the master password on reboot, lock, or idle.
+- **No master password to remember** on systems with a keyring: the
+  encryption key is created for you and kept in the OS keyring.
 - **Themes**, including automatic matching of your
   [Omarchy](https://omarchy.org) theme.
 - Uses your system `ssh`, so `~/.ssh/config`, `known_hosts`, and agent
@@ -84,8 +84,15 @@ stsuhi
 | `s`           | Settings                      |
 | `q`           | Quit                          |
 
-The master password is only asked for when a connection needs it.
-Connections that use only an SSH agent or 1Password never need one.
+With a system keyring (GNOME Keyring, KWallet, macOS Keychain), stsuhi
+never asks for a master password. Without one, it asks after you save a
+server with a password, and only then. Connections that use only an SSH
+agent or 1Password never need one. On such a system, **Settings → Unlock
+with 1Password** can read the master password from a 1Password item.
+
+Lost the master password, or wiped the keyring? Press `ctrl+r` at the
+password prompt to reset. This deletes the connections that had a saved
+password or key and keeps the rest.
 
 Run `stsuhi -debug` to try it with a throwaway data directory that is
 deleted on exit.
@@ -108,18 +115,17 @@ app has the full guide.
 
 - Data lives in `~/.config/stsuhi/` with `0700` directories and `0600`
   files.
-- The master password is never stored. Only a bcrypt hash is kept, to check
-  it.
+- With a keyring, the encryption key is a random value stored in the OS
+  keyring. Anyone who can read your keyring can read your saved
+  passwords, so keep the keyring locked with your login password.
+- Without a keyring, the master password is never stored. Only a bcrypt
+  hash is kept, to check it.
 - Each saved secret is encrypted with AES-256-GCM, using a key derived from
-  the master password with PBKDF2-SHA256 and a fresh random salt.
+  the master key with PBKDF2-SHA256 and a fresh random salt.
 - Connections that use only an SSH agent or 1Password store no secrets.
-- Auto-login is off by default. If you turn it on, the master password is
-  kept in your OS keyring (or read from 1Password) and forgotten again
-  under the rules you pick: on reboot, on logout/lock, or after a set
-  idle time.
 
 stsuhi types the login password when the screen shows a password prompt,
-and offers the sudo password only after you confirm. Only save passwords
+and offers it at a sudo prompt only after you confirm. Only save passwords
 for servers you trust.
 
 Found a security problem? Please report it privately through

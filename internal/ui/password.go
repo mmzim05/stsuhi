@@ -19,6 +19,8 @@ func NewPasswordInput(label, placeholder string) PasswordInput {
 	ti.Placeholder = placeholder
 	ti.EchoMode = textinput.EchoPassword
 	ti.EchoCharacter = '•'
+	// bubbles shows only the placeholder's first rune when Width is 0
+	ti.Width = 40
 	ti.Focus()
 
 	return PasswordInput{

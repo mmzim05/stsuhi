@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/mmzim05/stsuhi/internal/crypto"
+	"github.com/mmzim05/stsuhi/internal/keyring"
 	"github.com/mmzim05/stsuhi/internal/models"
 )
 
+// Names of the files and directories under the storage directory.
 const (
 	ConnectionsDirName = "connections"
 	MasterKeyFileName  = "master.key"
@@ -28,12 +31,13 @@ var ErrMasterPasswordRequired = errors.New("master password required to read thi
 // Each connection's non-secret fields (server name, address, port, auth
 // toggles, 1Password reference) are always plaintext JSON, so listing,
 // browsing, and renaming never need a master password. Only a manually
-// entered password/passkey path/sudo password is encrypted, and only then
+// entered password/passkey path is encrypted, and only then
 // is a master password required - see secretBundle and onDiskConnection.
 type FileStorage struct {
 	storageDir     string
 	connectionsDir string
 	masterKeyPath  string
+	keyringAccount string
 }
 
 // NewFileStorage creates a new FileStorage instance rooted at ~/.config/stsuhi
@@ -43,7 +47,9 @@ func NewFileStorage() (*FileStorage, error) {
 		return nil, fmt.Errorf("failed to get home directory: %w", err)
 	}
 
-	return NewFileStorageAt(filepath.Join(homeDir, ".config", "stsuhi")), nil
+	store := NewFileStorageAt(filepath.Join(homeDir, ".config", "stsuhi"))
+	store.keyringAccount = keyring.DefaultAccount
+	return store, nil
 }
 
 // NewFileStorageAt creates a FileStorage instance rooted at an arbitrary
@@ -54,7 +60,13 @@ func NewFileStorageAt(storageDir string) *FileStorage {
 		storageDir:     storageDir,
 		connectionsDir: filepath.Join(storageDir, ConnectionsDirName),
 		masterKeyPath:  filepath.Join(storageDir, MasterKeyFileName),
+		keyringAccount: keyring.DefaultAccount + ":" + storageDir,
 	}
+}
+
+// KeyringAccount names this directory's master key entry in the keyring
+func (fs *FileStorage) KeyringAccount() string {
+	return fs.keyringAccount
 }
 
 // InitStorage creates the storage directory structure
@@ -104,6 +116,38 @@ func (fs *FileStorage) VerifyMasterPassword(password string) (bool, error) {
 	return crypto.VerifyPassword(password, string(hashBytes)), nil
 }
 
+// ResetMasterPassword deletes the master key hash and every connection
+// sealed with it. Sealed files go first, so an interrupted reset can be
+// run again: while master.key exists, the prompt still offers the reset.
+func (fs *FileStorage) ResetMasterPassword() error {
+	entries, err := os.ReadDir(fs.connectionsDir)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read connections directory: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ConnectionFileExt {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ConnectionFileExt)
+		od, err := fs.readOnDisk(id)
+		if err != nil {
+			// Unreadable files never load anyway; leave them alone.
+			continue
+		}
+		if od.EncryptedSecret == "" {
+			continue
+		}
+		if err := os.Remove(fs.connectionFilePath(id)); err != nil {
+			return fmt.Errorf("delete sealed connection: %w", err)
+		}
+	}
+	err = os.Remove(fs.masterKeyPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("delete master key: %w", err)
+	}
+	return nil
+}
+
 func (fs *FileStorage) connectionFilePath(id string) string {
 	return filepath.Join(fs.connectionsDir, id+ConnectionFileExt)
 }
@@ -114,7 +158,7 @@ func (fs *FileStorage) connectionFilePath(id string) string {
 // User/Address/Port are plaintext ONLY when there's no local secret to
 // protect (e.g. a 1Password/SSH-agent-only connection, where those fields
 // aren't sensitive in the first place); the moment a connection has a
-// locally-stored Password/PasskeyPath/SudoPassword, those four join it
+// locally-stored Password/PasskeyPath, those four join it
 // inside EncryptedSecret instead, and these plaintext copies are omitted
 // entirely - see secretBundle and SaveConnection.
 type onDiskConnection struct {
@@ -147,17 +191,16 @@ type onDiskConnection struct {
 // used at all) the only place ServerName/User/Address/Port end up for a
 // connection with a local secret.
 type secretBundle struct {
-	ServerName   string `json:"server_name,omitempty"`
-	User         string `json:"user,omitempty"`
-	Address      string `json:"address,omitempty"`
-	Port         int    `json:"port,omitempty"`
-	Password     string `json:"password,omitempty"`
-	PasskeyPath  string `json:"passkey_path,omitempty"`
-	SudoPassword string `json:"sudo_password,omitempty"`
+	ServerName  string `json:"server_name,omitempty"`
+	User        string `json:"user,omitempty"`
+	Address     string `json:"address,omitempty"`
+	Port        int    `json:"port,omitempty"`
+	Password    string `json:"password,omitempty"`
+	PasskeyPath string `json:"passkey_path,omitempty"`
 }
 
 // SaveConnection seals ServerName/User/Address/Port together with
-// Password/PasskeyPath/SudoPassword under masterPassword whenever any of
+// Password/PasskeyPath under masterPassword whenever either of
 // the latter are set; otherwise every field is written in the clear.
 // Sealing or unsealing a connection (adding or removing its last local
 // secret) both fall out of this naturally - the current fields decide
@@ -184,7 +227,7 @@ func (fs *FileStorage) SaveConnection(conn *models.Connection, masterPassword st
 
 	if conn.HasLocalSecret() {
 		if masterPassword == "" {
-			return fmt.Errorf("saving a password/passkey/sudo password: %w", ErrMasterPasswordRequired)
+			return fmt.Errorf("saving a password/passkey: %w", ErrMasterPasswordRequired)
 		}
 		encrypted, err := sealSecret(conn, masterPassword)
 		if err != nil {
@@ -206,13 +249,12 @@ func (fs *FileStorage) SaveConnection(conn *models.Connection, masterPassword st
 // Address/Port, see secretBundle
 func sealSecret(conn *models.Connection, masterPassword string) (string, error) {
 	bundle := secretBundle{
-		ServerName:   conn.ServerName,
-		User:         conn.User,
-		Address:      conn.Address,
-		Port:         conn.Port,
-		Password:     conn.Password,
-		PasskeyPath:  conn.PasskeyPath,
-		SudoPassword: conn.SudoPassword,
+		ServerName:  conn.ServerName,
+		User:        conn.User,
+		Address:     conn.Address,
+		Port:        conn.Port,
+		Password:    conn.Password,
+		PasskeyPath: conn.PasskeyPath,
 	}
 	jsonData, err := json.Marshal(bundle)
 	if err != nil {
@@ -243,7 +285,7 @@ func (fs *FileStorage) readOnDisk(id string) (onDiskConnection, error) {
 		return od, err
 	}
 	if err := json.Unmarshal(data, &od); err != nil {
-		return od, err
+		return od, fmt.Errorf("parse connection %s: %w", id, err)
 	}
 	// The file name is the ID. Trusting the ID inside the file would let
 	// an edited file make the next save write outside connectionsDir.
@@ -331,7 +373,6 @@ func toModel(od onDiskConnection, masterPassword string) (*models.Connection, er
 	conn.Port = bundle.Port
 	conn.Password = bundle.Password
 	conn.PasskeyPath = bundle.PasskeyPath
-	conn.SudoPassword = bundle.SudoPassword
 	return conn, nil
 }
 
@@ -368,7 +409,7 @@ func (fs *FileStorage) ListConnections(masterPassword string) ([]*models.Connect
 			continue
 		}
 
-		id := entry.Name()[:len(entry.Name())-len(ConnectionFileExt)]
+		id := strings.TrimSuffix(entry.Name(), ConnectionFileExt)
 		// An error with a non-nil conn means Locked, which listing shows.
 		// No conn means an unreadable file: skip it, keep the rest.
 		conn, err := fs.load(id, masterPassword)
